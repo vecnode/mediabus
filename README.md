@@ -7,7 +7,6 @@
 ![Playback: libmpv](https://img.shields.io/badge/playback-libmpv-3b5526.svg)
 ![Render: OpenGL 3.3 core](https://img.shields.io/badge/render-OpenGL%203.3%20core-5586a4.svg)
 ![HTTP API: localhost only](https://img.shields.io/badge/HTTP%20API-localhost%20only-4b8bbe.svg)
-![Toolkit: none](https://img.shields.io/badge/toolkit-none%20(Qt%2FImGui%2FGTK)-lightgrey.svg)
 ![Tests: 511 checks](https://img.shields.io/badge/tests-511%20checks-brightgreen.svg)
 
 **One repository, three Windows applications that work together:** a libmpv video
