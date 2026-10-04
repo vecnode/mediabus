@@ -8,7 +8,6 @@
 ![Render: OpenGL 3.3 core](https://img.shields.io/badge/render-OpenGL%203.3%20core-5586a4.svg)
 ![HTTP API: localhost only](https://img.shields.io/badge/HTTP%20API-localhost%20only-4b8bbe.svg)
 ![Toolkit: none](https://img.shields.io/badge/toolkit-none%20(Qt%2FImGui%2FGTK)-lightgrey.svg)
-![Apps: 3](https://img.shields.io/badge/apps-3-9cf.svg)
 ![Tests: 511 checks](https://img.shields.io/badge/tests-511%20checks-brightgreen.svg)
 
 **One repository, three Windows applications that work together:** a libmpv video
@@ -27,7 +26,7 @@ it, and a launcher that starts and supervises both.
 |---|---|---|---|
 | **Player** | `media-player-cpp.exe` | GLFW + OpenGL 3.3 core + libmpv. Plays video, audio and stills, renders subtitles, draws a status HUD, and is scriptable. | `http://127.0.0.1:8080` |
 | **Controller** | `media-controller-cpp.exe` | A title-bar-shaped control strip. An HTTP *client* of the Player with an embedded Lua 5.1 host, so a session can be scripted. Links no libmpv and owns no decoder. | `http://127.0.0.1:8081` |
-| **Dashboard** | `media-dashboard-cpp.exe` | A launcher. Probes each application's health endpoint, starts and stops the two it started. No libmpv, no Lua, no server. | none (launcher) |
+| **Dashboard** | `media-dashboard-cpp.exe` | The launcher, and the one process that stays running: it lives in the notification area and starts and stops the other two. No libmpv, no Lua, no server. | none (launcher) |
 
 There is deliberately **no widget toolkit** anywhere — no ImGui, Qt or GTK. Every
 window, including the Dashboard's, draws through the same `RenderDevice` seam
@@ -69,6 +68,21 @@ Three properties make this a system rather than three programs in a folder:
 
 ## Build and run
 
+On Windows, two batch files at the root are the short path:
+
+| File | What it does |
+|---|---|
+| `build.bat` | builds everything: the three applications and the test binary |
+| `run.bat` | starts the launcher in the notification area — the usual entry point |
+
+`run.bat` starts **one** process, the launcher, and everything else is started
+from its tray menu. The Player and the Controller can then be closed and
+reopened without touching the launcher.
+
+Underneath, both are thin wrappers over the PowerShell scripts below, so the
+toolchain notes in [BUILDING.md](BUILDING.md) still apply and arguments pass
+straight through (`build.bat -Clean` works):
+
 ```powershell
 # 1. one-time: build libmpv against the ffmpeg installed on this machine
 pwsh -File tools/build-libmpv.ps1
@@ -79,7 +93,7 @@ pwsh -File build.ps1
 # 3. run any of them
 pwsh -File build.ps1 -Run                      # Player
 pwsh -File build.ps1 -Run -App Controller      # Controller
-pwsh -File build.ps1 -Run -App Dashboard       # Dashboard (starts the other two)
+pwsh -File build.ps1 -Run -App Dashboard       # the launcher
 ```
 
 > On a machine with only Windows PowerShell 5.1, `powershell -File build.ps1` is
@@ -228,15 +242,45 @@ discovery found under `<data>/controller-scripts`, so the route cannot open
 anything else on disk. A path that escapes the directory is refused with
 `no such script`.
 
-## The Dashboard
+## The Dashboard (the launcher)
 
-The one piece of friction in a two-app layout is knowing which executable to
-double-click in what order. The Dashboard removes it: one row per application
-with its state, path and port, and a LAUNCH or STOP button.
+The one piece of friction in a multi-app layout is knowing which executable to
+start in what order. The Dashboard removes it, and it is the one thing that stays
+running: it lives in the **notification area**, and the Player and the Controller
+come and go from its menu.
 
-STOP only ever targets a child this Dashboard started, so a Player launched from
-Explorer is never killed from here. Closing the Dashboard closes the children it
-started. Liveness comes from each application's health endpoint, polled on a
+```
+run.bat
+  └─ media-dashboard-cpp.exe --tray        one process, in the tray
+       ├─ Launch Player      -> media-player-cpp.exe      :8080
+       └─ Launch Controller  -> media-controller-cpp.exe  :8081
+```
+
+| Where | What |
+|---|---|
+| right-click the tray icon | Launch Player / Launch Controller / Stop Player / Stop Controller / Show-Hide Dashboard / **Quit** |
+| left-click the tray icon | show or hide the launcher window |
+| the launcher window | one row per application with its state, path and port, and a LAUNCH or STOP button |
+| the window's close box (or Esc) | **hides** the launcher; it does not exit |
+| QUIT in the tray menu | the only exit; it also stops the applications this launcher started |
+
+Three deliberate properties:
+
+- **A Player or Controller started elsewhere is never killed from here.**
+  `AppProbe::stop` only acts on a child this process created, which is also why
+  the tray's Stop items are greyed out for anything it did not start.
+- **One launcher per session.** A second `run.bat` notices the first and exits,
+  rather than putting a second icon in the tray and managing the same two
+  applications again.
+- **No invisible processes.** If the tray icon cannot be created — a locked or
+  remote session can refuse `Shell_NotifyIcon`, and this machine's session
+  currently refuses it for *any* program — the launcher shows its window and
+  closing that window really exits. A launcher with no icon and no window would
+  be a process only Task Manager could reach.
+
+Its log goes to `bin/dashboard.log` when `run.bat` starts it, because a tray
+application has no console to print to. Launched from a console, it prints there
+as usual. Liveness comes from each application's health endpoint, polled on a
 background thread — never on the frame loop, which must not wait on a socket.
 
 ## Scripting
@@ -300,6 +344,10 @@ cd bin; .\media_tests.exe
 
 # live: starts real windows and checks the three applications against each other
 powershell -File tools\verify-live.ps1
+
+# the launcher's tray plumbing: hide-on-close, one instance, QUIT, and the
+# no-icon fallback that keeps the process reachable
+powershell -File tools\verify-launcher.ps1
 ```
 
 `tools/soak.ps1` and `tools/stress-switch.ps1` measure memory and thread growth
@@ -310,12 +358,14 @@ without needing a window.
 ## Repository layout
 
 ```
+run.bat                       start the launcher in the notification area
+build.bat                     build everything on Windows
 src/main.cpp                  Player: window, frame loop, wiring
 src/controller_main.cpp       Controller: bar window, input, Lua host wiring
-src/dashboard_main.cpp        Dashboard: launcher window, probe thread
+src/dashboard_main.cpp        Launcher: window, tray, probe thread, frame loop
 src/app/HttpControlServer     the Player's control plane
 src/app/control/              Controller: model, view, PlayerClient, Lua host, its API
-src/app/dashboard/            Dashboard: model, view, AppProbe/launcher
+src/app/dashboard/            Launcher: model, view, AppProbe, TrayIcon
 src/app/http/                 shared HTTP/JSON client and the submit-and-poll queue
 src/app/render/               RenderDevice + the one OpenGL implementation
 src/app/hud/                  bitmap font for the HUD and the bars
@@ -323,7 +373,7 @@ src/backends/mpv/             MPVSurface: the only file that attaches mpv to GL
 src/core/                     logging, platform paths
 src/media/                    playlist, playback controller, script discovery
 tests/                        the headless suite
-tools/                        build, package, soak, stress and live-verify scripts
+tools/                        build, package, soak, stress and verify scripts
 p0/                           standalone libmpv audio probe
 scripts/                      reference scripts (installed into bin/data by the build)
 ```

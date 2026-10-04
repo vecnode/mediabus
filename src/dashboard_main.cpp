@@ -1,22 +1,25 @@
 /*
  * media-dashboard-cpp - launcher for the Player and the Controller
  *
- * A third, optional window whose only job is to show whether the Player and the
- * Controller are running and to start or stop them. It exists so an operator
- * does not have to know which of two executables to double-click in what order,
- * which is the one piece of friction the two-app layout would otherwise have.
+ * This is the "mother app": the one thing an operator starts, and the one thing
+ * that stays running. It lives in the notification area (the tray) with a menu
+ * that starts and stops the other two applications, so the Player and the
+ * Controller can be closed and reopened without losing the launcher.
+ *
+ * Closing its window hides it rather than exiting, and QUIT in the tray menu is
+ * the only way out — unless the tray could not be created at all, in which case
+ * the window goes back to being an ordinary window that closes normally. That
+ * fallback matters: a launcher with no tray and no exit is a process the user
+ * cannot get rid of.
  *
  * Liveness is decided by each application's own health endpoint, not by process
  * enumeration: that is portable, it needs no elevation, and it answers the
  * question that matters ("is its API answering?") rather than a proxy for it.
  *
- * Closing the Dashboard closes the children it started: the process handles are
- * released and the documented Windows behaviour for a job-less process handle
- * does the rest. STOP only ever targets a child this process created, so a
- * Player launched from Explorer is never killed from here.
- *
  * Drawing goes through media::RenderDevice, as in both other apps: this file
- * must never name an OpenGL symbol.
+ * must never name an OpenGL symbol. The tray is shell integration, not
+ * rendering, and it is the only Win32 detail in here — and it lives in
+ * TrayIcon.cpp, not in this file.
  *
  * Copyright (c) vecnode 2026 - GPL-2.0-or-later (see LICENSE)
  */
@@ -24,6 +27,7 @@
 #include "app/dashboard/AppLauncher.h"
 #include "app/dashboard/DashboardModel.h"
 #include "app/dashboard/DashboardView.h"
+#include "app/dashboard/TrayIcon.h"
 #include "app/render/RenderDevice.h"
 #include "core/Log.h"
 
@@ -47,6 +51,8 @@ GLFWwindow* gWindow = nullptr;
 struct Options {
 	int width = media::DashboardModel::kDefaultWidth;
 	int height = media::DashboardModel::kDefaultHeight;
+	/// Start hidden, living only in the tray. What run.bat asks for.
+	bool startInTray = false;
 };
 
 void printUsage() {
@@ -57,11 +63,15 @@ void printUsage() {
 		"\n"
 		"  --width N     window width  (default %d)\n"
 		"  --height N    window height (default %d)\n"
+		"  --tray        start hidden, in the notification area\n"
 		"  --help, -h    show this text\n"
 		"\n"
-		"Launch: click LAUNCH on a row. STOP only stops an app this Dashboard "
+		"Tray:  right-click the icon for Launch Player / Launch Controller / Quit.\n"
+		"       Left-click shows or hides this window.\n"
+		"Window: click LAUNCH on a row. STOP only stops an app this launcher "
 		"started.\n"
-		"Keys:  Esc quit\n",
+		"Keys:  Esc hides the window while the tray icon is there; QUIT in the "
+		"tray menu exits.\n",
 		media::DashboardModel::kDefaultWidth, media::DashboardModel::kDefaultHeight);
 }
 
@@ -80,6 +90,8 @@ bool parseOptions(int argc, char** argv, Options& out) {
 			nextInt(out.width);
 		} else if (arg == "--height") {
 			nextInt(out.height);
+		} else if (arg == "--tray" || arg == "--hidden") {
+			out.startInTray = true;
 		} else {
 			LOG_WARN("Dashboard") << "ignoring unknown argument: " << arg;
 		}
@@ -181,6 +193,40 @@ private:
 	std::string controllerPath_;
 };
 
+/// Everything the window callbacks need. One instance lives for the whole run,
+/// and the window's user-data slot points at it.
+struct UiState {
+	/// True once the tray icon exists. While it does, closing or hiding the
+	/// window keeps the launcher alive; without it, the window is the only way
+	/// to quit and must behave normally.
+	bool trayAvailable = false;
+	/// Set by QUIT in the tray menu: the only way out.
+	bool quit = false;
+
+	bool clickPending = false;
+	double x = 0.0;
+	double y = 0.0;
+};
+
+void setWindowVisible(GLFWwindow* window, bool visible) {
+	if (visible) {
+		glfwShowWindow(window);
+		glfwFocusWindow(window);
+	} else {
+		glfwHideWindow(window);
+	}
+}
+
+/// Hover text for the tray icon: the one thing visible while the window is not.
+std::string trayTooltip(const media::DashboardModel& model) {
+	std::string text = "mediaplayer-app launcher";
+	for (const media::DashboardRow& row : model.rows()) {
+		text += row.app == media::DashboardApp::Player ? " | Player: " : " | Controller: ";
+		text += row.running ? "up" : "down";
+	}
+	return text;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -203,6 +249,8 @@ int main(int argc, char** argv) {
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 	glfwWindowHint(GLFW_SAMPLES, 0);
+	// --tray means the icon is the whole user interface until it is asked for.
+	glfwWindowHint(GLFW_VISIBLE, options.startInTray ? GLFW_FALSE : GLFW_TRUE);
 
 	gWindow = glfwCreateWindow(options.width, options.height,
 		"media-dashboard-cpp", nullptr, nullptr);
@@ -237,19 +285,74 @@ int main(int argc, char** argv) {
 	dashboard.refresh();
 	dashboard.applyTo(model);
 
-	struct InputState {
-		bool clickPending = false;
-		double x = 0.0;
-		double y = 0.0;
+	// --- input and tray ---------------------------------------------------
+	UiState ui;
+	glfwSetWindowUserPointer(gWindow, &ui);
+
+	// The tray menu runs the same two things the window's buttons do, through
+	// the same Dashboard object, so there is no second control path that could
+	// disagree with the window about what is running.
+	media::TrayIcon tray;
+	const auto onTray = [&](media::TrayAction action) {
+		switch (action) {
+			case media::TrayAction::LaunchPlayer:
+				dashboard.handle(media::DashboardAction::LaunchPlayer, model);
+				break;
+			case media::TrayAction::LaunchController:
+				dashboard.handle(media::DashboardAction::LaunchController, model);
+				break;
+			case media::TrayAction::StopPlayer:
+				dashboard.handle(media::DashboardAction::StopPlayer, model);
+				break;
+			case media::TrayAction::StopController:
+				dashboard.handle(media::DashboardAction::StopController, model);
+				break;
+			case media::TrayAction::ToggleWindow:
+				setWindowVisible(gWindow, glfwGetWindowAttrib(gWindow, GLFW_VISIBLE) == 0);
+				break;
+			case media::TrayAction::Quit:
+				ui.quit = true;
+				break;
+			case media::TrayAction::None:
+				break;
+		}
 	};
-	InputState input;
-	glfwSetWindowUserPointer(gWindow, &input);
+	switch (tray.create(trayTooltip(model), onTray)) {
+		case media::TrayResult::Created:
+			ui.trayAvailable = true;
+			break;
+
+		case media::TrayResult::AlreadyRunning:
+			// A launcher is already in the tray for this session. Exit quietly:
+			// becoming a second window would be a worse answer than doing
+			// nothing, since the one already there can do everything this one
+			// could.
+			LOG_NOTICE("Dashboard") << "the launcher is already running; nothing to do";
+			dashboard.stop();
+			device.reset();
+			glfwDestroyWindow(gWindow);
+			glfwTerminate();
+			return 0;
+
+		case media::TrayResult::Unavailable:
+		case media::TrayResult::Unsupported:
+			LOG_WARN("Dashboard") << "running as an ordinary window: Esc closes it";
+			// Never leave an invisible process behind. --tray creates the window
+			// hidden, so if the icon could not be added there would be nothing
+			// on screen and nothing in the tray: a process only Task Manager
+			// could reach. Showing the window is the safety net for that.
+			if (options.startInTray) {
+				glfwShowWindow(gWindow);
+				LOG_WARN("Dashboard") << "no tray icon, so the window is shown instead";
+			}
+			break;
+	}
 
 	glfwSetMouseButtonCallback(gWindow, [](GLFWwindow* window, int button, int action, int) {
 		if (button != GLFW_MOUSE_BUTTON_LEFT) {
 			return;
 		}
-		auto* state = static_cast<InputState*>(glfwGetWindowUserPointer(window));
+		auto* state = static_cast<UiState*>(glfwGetWindowUserPointer(window));
 		if (state == nullptr) {
 			return;
 		}
@@ -264,9 +367,26 @@ int main(int argc, char** argv) {
 	});
 
 	glfwSetKeyCallback(gWindow, [](GLFWwindow* window, int key, int, int action, int) {
-		if (key == GLFW_KEY_ESCAPE && (action == GLFW_PRESS || action == GLFW_REPEAT)) {
-			glfwSetWindowShouldClose(window, GLFW_TRUE);
+		if (key != GLFW_KEY_ESCAPE || (action != GLFW_PRESS && action != GLFW_REPEAT)) {
+			return;
 		}
+		auto* state = static_cast<UiState*>(glfwGetWindowUserPointer(window));
+		if (state != nullptr && state->trayAvailable) {
+			// Hiding, not closing: the tray icon is how it comes back, and QUIT
+			// in its menu is the only exit.
+			glfwHideWindow(window);
+			return;
+		}
+		glfwSetWindowShouldClose(window, GLFW_TRUE);
+	});
+
+	glfwSetWindowCloseCallback(gWindow, [](GLFWwindow* window) {
+		auto* state = static_cast<UiState*>(glfwGetWindowUserPointer(window));
+		if (state == nullptr || !state->trayAvailable) {
+			return;   // no tray: closing really closes, or there is no way out
+		}
+		glfwSetWindowShouldClose(window, GLFW_FALSE);
+		glfwHideWindow(window);
 	});
 
 	int fbW = 0;
@@ -281,20 +401,54 @@ int main(int argc, char** argv) {
 		<< media::AppProbe::kPlayerPort;
 	LOG_NOTICE("Dashboard") << "  controller API : 127.0.0.1:"
 		<< media::AppProbe::kControllerPort;
+	LOG_NOTICE("Dashboard") << "  exit           : QUIT in the tray menu"
+		<< (ui.trayAvailable ? "" : " (no tray; close the window instead)");
 
-	while (glfwWindowShouldClose(gWindow) == GLFW_FALSE) {
+	while (!ui.quit && glfwWindowShouldClose(gWindow) == GLFW_FALSE) {
 		glfwPollEvents();
+		if (ui.quit) {
+			break;
+		}
 
-		if (input.clickPending) {
-			input.clickPending = false;
+		dashboard.applyTo(model);
+
+		// Keep the menu and the hover text honest about what is running, and
+		// about which applications this launcher is allowed to stop.
+		media::TrayState trayState;
+		for (const media::DashboardRow& row : model.rows()) {
+			const bool isPlayer = row.app == media::DashboardApp::Player;
+			if (isPlayer) {
+				trayState.playerRunning = row.running;
+				// Same rule the window's STOP button uses: only a running child
+				// of this process may be stopped from here.
+				trayState.playerManaged = row.running && row.managed;
+			} else {
+				trayState.controllerRunning = row.running;
+				trayState.controllerManaged = row.running && row.managed;
+			}
+		}
+		const bool windowVisible = glfwGetWindowAttrib(gWindow, GLFW_VISIBLE) != 0;
+		trayState.windowVisible = windowVisible;
+		tray.setState(trayState);
+		tray.setTooltip(trayTooltip(model));
+
+		if (!windowVisible) {
+			// Hidden in the tray. Block until something happens — a tray click
+			// wakes this, because GLFW waits on every message for the thread,
+			// not only on its own window's — rather than spinning a frame loop
+			// nobody can see.
+			glfwWaitEventsTimeout(0.5);
+			continue;
+		}
+
+		if (ui.clickPending) {
+			ui.clickPending = false;
 			const media::DashboardAction action = model.hitTest(
-				static_cast<float>(input.x), static_cast<float>(input.y));
+				static_cast<float>(ui.x), static_cast<float>(ui.y));
 			if (action != media::DashboardAction::None) {
 				dashboard.handle(action, model);
 			}
 		}
-
-		dashboard.applyTo(model);
 
 		glfwGetFramebufferSize(gWindow, &fbW, &fbH);
 		if (fbW <= 0 || fbH <= 0) {
@@ -312,7 +466,15 @@ int main(int argc, char** argv) {
 		glfwSwapBuffers(gWindow);
 	}
 
+	// Quit is an explicit "I am done", so it takes the applications this
+	// launcher started with it. One that someone else started is left alone:
+	// AppProbe::stop refuses anything that is not this process's child.
+	LOG_NOTICE("Dashboard") << "quitting; stopping the applications this launcher started";
+	dashboard.handle(media::DashboardAction::StopPlayer, model);
+	dashboard.handle(media::DashboardAction::StopController, model);
+
 	dashboard.stop();
+	tray.destroy();
 	device.reset();
 	glfwDestroyWindow(gWindow);
 	glfwTerminate();

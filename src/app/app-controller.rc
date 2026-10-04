@@ -13,3 +13,7 @@
 #include <windows.h>
 
 IDI_APPICON ICON "../../assets/icon/icon.ico"
+
+/* GLFW reads this name for its window class; without it the window shows the
+ * generic Windows logo instead of the product icon. See app.rc. */
+GLFW_ICON ICON "../../assets/icon/icon.ico"

@@ -1,7 +1,7 @@
 # AGENTS.md — mediaplayer-app
 
 Guidance for AI coding agents (and humans) working in this repository. This file
-is the canonical agent guide; `CLAUDE.md` defers to it.
+is the canonical agent guide.
 
 ## What this repository is
 
@@ -13,14 +13,35 @@ widget toolkit anywhere:
 | ------ | ------------------ | ---------- |
 | `media-player-cpp` | `src/main.cpp` | The player: libmpv (render API) for video, audio, A/V sync and subtitles, plus a localhost HTTP control API on `:8080`. Scriptable with Lua/JS through mpv. |
 | `media-controller-cpp` | `src/controller_main.cpp` | A title-bar-shaped control strip. An HTTP **client** of the player, with an embedded Lua 5.1 host and its own API on `:8081`. Links no libmpv and owns no decoder. |
-| `media-dashboard-cpp` | `src/dashboard_main.cpp` | A launcher. Probes each application's health endpoint on a background thread, spawns and stops the two it started. No libmpv, no Lua, no server. |
+| `media-dashboard-cpp` | `src/dashboard_main.cpp` | The launcher, and the one process that stays running: it lives in the notification area and starts and stops the other two from there. Probes each health endpoint on a background thread. No libmpv, no Lua, no server. **Windows subsystem binary**: it must never grow a console window. |
 
 There is **no widget toolkit** — no ImGui, no Qt, no GTK. The player's HUD, the
 controller bar and the dashboard are all drawn as quads through the same
-`RenderDevice` seam that composites video.
+`RenderDevice` seam that composites video. The launcher's tray icon is shell
+integration rather than rendering, and it lives in
+`src/app/dashboard/TrayIcon.{h,cpp}` — the only Win32 in the launcher.
 
 `media_tests.exe` is a fourth, headless target: it links the applications' logic
 without a GL context.
+
+### The launcher is the entry point, and it is a tray application
+
+`run.bat` starts it; everything else is started from its tray menu. Three
+properties are load-bearing and easy to break:
+
+- **Closing its window hides it** (as does Esc) — QUIT in the tray menu is the
+  only exit. That is the whole point: the Player and the Controller can be closed
+  and reopened without losing the launcher.
+- **No invisible processes.** If `Shell_NotifyIcon` fails, `TrayIcon::create`
+  returns `Unavailable` and the launcher shows its window, where closing really
+  exits. Never let `--tray` leave a process with no icon and no window.
+- **One launcher per session**, guarded by a named mutex held for the process's
+  lifetime. A second launch exits quietly rather than managing the same two
+  applications again. Do not release that mutex on a tray failure.
+
+The tray's actions and the window's buttons both go through the same
+`Dashboard::handle`, so the two paths cannot disagree about what is running.
+`tools/verify-launcher.ps1` drives all of it through the real binary.
 
 ### How the three applications talk to each other
 
@@ -57,6 +78,11 @@ pwsh -File build.ps1 -Run           # build and launch the player
 pwsh -File build.ps1 -Run -App Controller   # or -App Dashboard
 ```
 
+On the root there are also two batch wrappers, which are what a person double
+clicks and what the README leads with: `build.bat` (all of the above, with
+PowerShell 7 or 5.1 whichever exists) and `run.bat` (start the launcher in the
+tray). Keep them thin — `build.ps1` is where the logic belongs.
+
 On a machine that only has Windows PowerShell 5.1, `powershell -File build.ps1`
 is equivalent — the scripts use no PowerShell 7 feature. Do not assume `pwsh`
 exists.
@@ -66,12 +92,16 @@ exists.
 - Tests: `bin/media_tests.exe` (run with `bin/` as the working directory).
 - Live check: `powershell -File tools/verify-live.ps1` starts all three, drives
   them through each other's APIs and exits non-zero on any failed check.
+- Launcher check: `powershell -File tools/verify-launcher.ps1` covers the tray
+  behaviours below, which no headless test can reach.
 - The apps resolve `bin/data/` **relative to the executable**, so the working
   directory does not matter for media lookup.
 - Never launch a child with a bare `Start-Process` in a script that may run
   non-interactively: it attaches a new console and blocks the parent forever
   with no output. Use `-NoNewWindow` and redirect stdio, as `verify-live.ps1`
-  does.
+  does. `run.bat` uses `Start-Process` for the opposite reason — to detach and
+  redirect — and deliberately not `start`, which does not pass a redirection on
+  to its child.
 
 ### Why libmpv is built from source
 
@@ -91,11 +121,12 @@ ffmpeg that is actually present and vendors the result into `bin/` and `lib/`.
 ```
 src/main.cpp                  Player: window, frame loop, wiring
 src/controller_main.cpp       Controller: bar window, input, Lua host wiring
-src/dashboard_main.cpp        Dashboard: launcher window, probe thread
+src/dashboard_main.cpp        Launcher: window, tray, probe thread, frame loop
 src/app/HttpControlServer     the player's control plane
 src/app/control/              Controller: ControllerModel/View, PlayerClient,
                               LuaControllerScript, ControllerHttpServer
-src/app/dashboard/            Dashboard: DashboardModel/View, AppLauncher (AppProbe)
+src/app/dashboard/            Launcher: DashboardModel/View, AppLauncher (AppProbe),
+                              TrayIcon (the only Win32 in the launcher)
 src/app/http/                 CommandQueue + HttpJsonClient, shared by both sides
 src/app/render/               RenderDevice + the one OpenGL implementation
 src/app/hud/                  bitmap font, glyph data

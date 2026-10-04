@@ -25,7 +25,9 @@ together: the Dashboard locates the other two **by name in its own directory**.
 
 On a machine with only Windows PowerShell 5.1, `powershell -File build.ps1` is
 equivalent to the `pwsh` form used below — the scripts use no PowerShell 7
-feature.
+feature. There is also `build.bat` on the root, which builds everything and
+picks whichever PowerShell exists; it calls `build.ps1` and adds nothing of its
+own.
 
 ## 1. `PATH` must be confined to MSYS2 (silent-failure trap)
 

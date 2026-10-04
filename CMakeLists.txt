@@ -231,9 +231,16 @@ if(MEDIA_BUILD_DASHBOARD)
         src/app/dashboard/AppLauncher.cpp
         src/app/dashboard/DashboardModel.cpp
         src/app/dashboard/DashboardView.cpp
+        src/app/dashboard/TrayIcon.cpp
     )
     if(WIN32)
         target_sources(media-dashboard-cpp PRIVATE src/app/app-dashboard.rc)
+        # The launcher is a tray application, so it is linked as a Windows
+        # subsystem binary: no console window appears next to the icon, which is
+        # what a plain `start` would otherwise leave on screen. Its log lines
+        # still arrive when stdout/stderr are redirected (run.bat writes them to
+        # bin/dashboard.log) or when it is launched from an existing console.
+        set_target_properties(media-dashboard-cpp PROPERTIES WIN32_EXECUTABLE TRUE)
     endif()
     target_link_libraries(media-dashboard-cpp PRIVATE
         media_control
@@ -242,7 +249,8 @@ if(MEDIA_BUILD_DASHBOARD)
         OpenGL::GL
     )
     if(WIN32)
-        target_link_libraries(media-dashboard-cpp PRIVATE gdi32 ole32 uuid)
+        # The launcher lives in the notification area, so it needs Shell_NotifyIcon.
+        target_link_libraries(media-dashboard-cpp PRIVATE gdi32 ole32 uuid shell32)
     endif()
 endif()
 
