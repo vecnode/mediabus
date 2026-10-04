@@ -332,7 +332,6 @@ void MPVSurface::shutdown() {
 		mpv_ = nullptr;
 	}
 	initialized_ = false;
-	playing_ = false;
 }
 
 bool MPVSurface::queryNumber(const char* property, double& out) const {
@@ -398,7 +397,6 @@ void MPVSurface::pumpEvents() {
 				} else {
 					LOG_NOTICE("MPVSurface") << "end of file (" << currentPath_ << ")";
 				}
-				playing_ = false;
 				break;
 			}
 			case MPV_EVENT_PROPERTY_CHANGE: {
@@ -468,7 +466,7 @@ void MPVSurface::draw(RenderDevice& device, const Rect& dest) {
 	device.drawQuad(frameTexture_, dest);
 }
 
-bool MPVSurface::open(const MediaClip& clip) {
+bool MPVSurface::open(const MediaClip& clip, bool autoplay) {
 	if (mpv_ == nullptr) {
 		return false;
 	}
@@ -484,7 +482,6 @@ bool MPVSurface::open(const MediaClip& clip) {
 	videoWidth_ = 0;
 	videoHeight_ = 0;
 	decoderName_.clear();
-	playing_ = false;
 	paused_ = true;
 
 	// `replace` stops the current file instead of queueing onto the playlist.
@@ -496,9 +493,21 @@ bool MPVSurface::open(const MediaClip& clip) {
 		return false;
 	}
 
-	// Prime a preview frame while paused, mirroring the old primeFirstFrame()
-	// behaviour so a paused clip is not a black rectangle.
+	// Prime a preview frame while paused, so a clip that is opened but not started
+	// is a still picture rather than a black rectangle.
 	mpv_set_property_string(mpv_, "pause", "yes");
+
+	if (autoplay && !currentIsImage_) {
+		// Undo the priming pause. This is the step that was missing: mpv accepts
+		// `pause no` before the file has finished loading and honours it when it
+		// does, so the clip starts on its own.
+		//
+		// A still is left paused on purpose. It has no timeline, image-display-
+		// duration=inf holds it, and "playing" is a state it cannot be in - the
+		// status reports it as an image instead.
+		mpv_set_property_string(mpv_, "pause", "no");
+		paused_ = false;
+	}
 	return true;
 }
 
@@ -508,7 +517,6 @@ void MPVSurface::close() {
 	}
 	const char* command[] = {"stop", nullptr};
 	mpv_command(mpv_, command);
-	playing_ = false;
 	paused_ = true;
 	videoWidth_ = 0;
 	videoHeight_ = 0;
@@ -525,7 +533,6 @@ void MPVSurface::play() {
 		return;
 	}
 	mpv_set_property_string(mpv_, "pause", "no");
-	playing_ = true;
 	paused_ = false;
 }
 
@@ -534,7 +541,6 @@ void MPVSurface::pause() {
 		return;
 	}
 	mpv_set_property_string(mpv_, "pause", "yes");
-	playing_ = false;
 	paused_ = true;
 }
 
@@ -549,8 +555,15 @@ TransportState MPVSurface::state() const {
 	out.loaded = mpv_ != nullptr && videoWidth_ > 0;
 	out.isImage = currentIsImage_;
 	// A held still has no timeline: never "playing", never seekable, no clock.
-	out.playing = currentIsImage_ ? false : (playing_ && !paused_);
+	//
+	// For anything else, `paused` is the single source of truth and `playing` is
+	// its inverse. mpv's `pause` property is the only thing that actually decides
+	// this, and the observer on it keeps `paused_` current - whereas a separate
+	// `playing_` flag was a second opinion that could disagree with it, and did:
+	// opening a clip came back with playing=false and paused=false at the same
+	// time, which is a state no transport can be in.
 	out.paused = currentIsImage_ ? true : paused_;
+	out.playing = currentIsImage_ ? false : (!paused_ && out.loaded);
 	out.subtitlesEnabled = subtitlesEnabled_;
 	out.decoder = decoderName_;
 

@@ -46,8 +46,15 @@ public:
 	Frame draw(ui::UiLayer& ui, const DashboardModel& model,
 		ScriptLibrary* library, ScriptDocument& document, bool controllerOnline);
 
+	/// The tab the panel was ASKED to open on. This is a one-shot request: it is
+	/// honoured on the next draw and then cleared, because after that Dear ImGui
+	/// owns which tab is open. The tab actually on screen comes back in
+	/// Frame::tab.
 	Tab tab() const { return tab_; }
-	void setTab(Tab tab) { tab_ = tab; }
+	void setTab(Tab tab) {
+		tab_ = tab;
+		applyRequestedTab_ = true;
+	}
 
 	/// Move the editor's caret to an error line on the next frame, so the
 	/// operator's eye lands on the problem rather than wherever the caret was.
@@ -96,6 +103,8 @@ private:
 	void drawLog(const DashboardModel& model);
 
 	Tab tab_ = Tab::Applications;
+	/// True while a setTab() request has not been handed to ImGui yet.
+	bool applyRequestedTab_ = false;
 	std::string scriptStatus_;
 	std::string selected_;
 	std::vector<ScriptEntry> scripts_;

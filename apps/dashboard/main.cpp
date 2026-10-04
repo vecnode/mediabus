@@ -82,7 +82,28 @@ struct Options {
 	/// Never create the tray icon: an ordinary window that closes normally.
 	/// The escape hatch for a machine where Shell_NotifyIcon does not work.
 	bool noTray = false;
+	/// Which tab to open on. Applications is the useful default; the other two
+	/// exist so a script or a screenshot can go straight to what it is checking
+	/// without driving the mouse.
+	media::DashboardPanel::Tab tab = media::DashboardPanel::Tab::Applications;
 };
+
+/// Parse a tab name as --tab accepts it.
+bool tabFromName(const std::string& name, media::DashboardPanel::Tab& out) {
+	if (name == "applications" || name == "apps") {
+		out = media::DashboardPanel::Tab::Applications;
+		return true;
+	}
+	if (name == "scripts") {
+		out = media::DashboardPanel::Tab::Scripts;
+		return true;
+	}
+	if (name == "activity" || name == "log") {
+		out = media::DashboardPanel::Tab::Log;
+		return true;
+	}
+	return false;
+}
 
 void printUsage() {
 	std::printf(
@@ -90,8 +111,9 @@ void printUsage() {
 		"\n"
 		"Usage: vn-mediabus-dashboard.exe [options]\n"
 		"\n"
-		"  --width N     window width  (default %d, times the monitor DPI scale)\n"
-		"  --height N    window height (default %d, times the monitor DPI scale)\n"
+		"  --width N     window width  (default %d pixels)\n"
+		"  --height N    window height (default %d pixels)\n"
+		"  --tab NAME    open on this tab: applications | scripts | activity\n"
 		"  --tray        start hidden, in the notification area\n"
 		"  --no-tray     never add a tray icon; the window is the whole UI and\n"
 		"                closing it exits (use this if no tray icon appears)\n"
@@ -126,6 +148,14 @@ bool parseOptions(int argc, char** argv, Options& out) {
 			out.startInTray = true;
 		} else if (arg == "--no-tray") {
 			out.noTray = true;
+		} else if (arg == "--tab") {
+			if (i + 1 < argc) {
+				const std::string name = argv[++i];
+				if (!tabFromName(name, out.tab)) {
+					LOG_WARN("Dashboard") << "unknown tab '" << name
+						<< "'; expected applications, scripts or activity";
+				}
+			}
 		} else {
 			LOG_WARN("Dashboard") << "ignoring unknown argument: " << arg;
 		}
@@ -455,6 +485,40 @@ std::string newScriptTemplate(const std::string& name) {
 		"controller.OnTick(M.onTick)\n";
 }
 
+/// Load one script's text into the editor.
+///
+/// The document has to be told WHICH script it holds as well as what is in it:
+/// setText() alone leaves `loaded()` false, because a buffer with no name has
+/// nowhere to save to. Getting that wrong is what made the editor keep saying
+/// "select a script" while a script was plainly selected - so this goes through
+/// create(), which adopts the name under the same containment rule load() uses,
+/// and then sets the text.
+///
+/// Returns false and leaves the document alone when the Controller cannot supply
+/// the text, so a failure cannot silently blank what the operator was editing.
+bool openScriptIntoEditor(const std::string& name, media::DashboardPanel& panel,
+	media::ScriptLibrary& library, media::ScriptDocument& document) {
+	std::string text;
+	const media::ScriptLibrary::Result read = library.read(name, text);
+	if (!read.ok) {
+		panel.setScriptStatus("controller: " + read.error);
+		return false;
+	}
+
+	std::string error;
+	if (!document.create(name, media::kControllerScriptsSubdirectory, error)) {
+		panel.setScriptStatus(error);
+		return false;
+	}
+	document.setText(std::move(text));
+	// Freshly read from disk is not a local edit.
+	document.markSaved();
+	document.clearError();
+	panel.setSelection(name);
+	panel.setDirty(false);
+	return true;
+}
+
 /// Act on everything the Scripts tab asked for this frame.
 ///
 /// Kept as a free function rather than a method on the panel so the panel stays
@@ -483,13 +547,9 @@ void handleScriptRequests(media::DashboardPanel& panel, media::ScriptLibrary& li
 			newScriptTemplate(name));
 		panel.setScriptStatus(written.ok ? "created " + name : written.error);
 		if (written.ok) {
-			panel.setSelection(name);
-			std::string text;
-			if (library.read(name, text).ok) {
-				document.setText(text);
-				document.markSaved();
-				panel.setDirty(false);
-			}
+			// Same path as opening an existing one, so the new script's name is
+			// adopted too - setText() alone leaves a document with nowhere to save.
+			openScriptIntoEditor(name, panel, library, document);
 			model.log("created script " + name);
 		}
 		return;
@@ -573,6 +633,9 @@ void handleScriptRequests(media::DashboardPanel& panel, media::ScriptLibrary& li
 int main(int argc, char** argv) {
 	std::setvbuf(stdout, nullptr, _IONBF, 0);
 	media::log::setThresholdFromEnv();
+	// Windows-subsystem binary: with no console to write to, the log goes to
+	// bin/mediabus-dashboard.log. See core/Log.cpp.
+	media::log::useFileSink("dashboard");
 
 	Options options;
 	if (!parseOptions(argc, argv, options)) {
@@ -746,6 +809,7 @@ int main(int argc, char** argv) {
 	uiLayer->installCallbacks();
 
 	media::DashboardPanel panel;
+	panel.setTab(options.tab);
 	// The Dashboard is a client of the Controller's script API, exactly as the
 	// Controller is a client of the Player's: it never touches the scripts
 	// directory itself. See ScriptLibrary.
@@ -778,6 +842,9 @@ int main(int argc, char** argv) {
 	std::chrono::steady_clock::time_point lastScriptRefresh{};
 	std::chrono::steady_clock::time_point lastFrame = std::chrono::steady_clock::now();
 	bool wasVisible = true;
+	// Which tab the panel actually drew last frame. Starts as the requested one,
+	// because that is what the first draw will open.
+	media::DashboardPanel::Tab visibleTab = options.tab;
 
 	while (!ui.quit && glfwWindowShouldClose(gWindow) == GLFW_FALSE) {
 		glfwPollEvents();
@@ -830,7 +897,11 @@ int main(int argc, char** argv) {
 		// --- the script list, refreshed a few times a second ----------------
 		// A localhost GET, so it is cheap, but not so cheap that it belongs in a
 		// 60 Hz loop. The Controller is the only thing that can answer it.
-		if (panel.tab() == media::DashboardPanel::Tab::Scripts) {
+		//
+		// `visibleTab` is what the panel actually drew last frame, not what it was
+		// asked to open on: Dear ImGui owns the tab bar, so once the operator
+		// clicks another tab only the drawn frame knows.
+		if (visibleTab == media::DashboardPanel::Tab::Scripts) {
 			const auto now = std::chrono::steady_clock::now();
 			if (now - lastScriptRefresh > std::chrono::seconds(2)) {
 				lastScriptRefresh = now;
@@ -840,6 +911,13 @@ int main(int argc, char** argv) {
 					// Mark which one is running, from the Controller's own answer.
 					for (media::ScriptEntry& entry : entries) {
 						entry.open = (entry.name == document.name());
+					}
+					// Select the first script when the operator has not chosen one.
+					// Without this the editor sits empty next to a full list, and
+					// the list looks broken rather than waiting.
+					if (panel.selection().empty() && !entries.empty()) {
+						openScriptIntoEditor(entries.front().name, panel, scripts,
+							document);
 					}
 					panel.setScriptList(std::move(entries));
 				} else {
@@ -862,6 +940,7 @@ int main(int argc, char** argv) {
 
 		media::DashboardPanel::Frame frame = panel.draw(*uiLayer, model, &scripts,
 			document, model.rowFor(media::DashboardApp::Controller).running);
+		visibleTab = frame.tab;
 
 		if (frame.requestQuit) {
 			if (ui.trayAvailable) {
@@ -876,6 +955,17 @@ int main(int argc, char** argv) {
 			dashboard.handle(frame.action, model);
 		}
 		handleScriptRequests(panel, scripts, document, model);
+
+		// The operator picked a different script in the list. The panel reports the
+		// selection; loading the text is this loop's job, because the panel is not
+		// allowed to touch the network.
+		//
+		// Done after the draw so the click that caused it is the one being acted
+		// on, and guarded on the document actually disagreeing - otherwise every
+		// frame would re-read the file and throw away unsaved edits.
+		if (!panel.selection().empty() && panel.selection() != document.name()) {
+			openScriptIntoEditor(panel.selection(), panel, scripts, document);
+		}
 
 		uiLayer->endFrame();
 		glfwSwapBuffers(gWindow);

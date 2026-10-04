@@ -231,6 +231,12 @@ if(MEDIA_BUILD_APP)
         # against the .rc file, so the icon is handed over as an absolute path.
         target_compile_definitions(vn-mediabus-player PRIVATE
             MEDIABUS_ICON="${CMAKE_SOURCE_DIR}/assets/icon/icon.ico")
+        # A Windows-subsystem binary: Windows never opens a console window beside
+        # it. That is what a GUI application must do - a black terminal sitting
+        # next to the video player is a defect, not a diagnostic. Run from an
+        # existing console and it attaches to that one instead (see core/Log.cpp),
+        # so `--help` and the log lines still appear where a person expects them.
+        set_target_properties(vn-mediabus-player PROPERTIES WIN32_EXECUTABLE TRUE)
     endif()
     target_link_libraries(vn-mediabus-player PRIVATE
         mediabus_net mediabus_mpv_surface)
@@ -264,6 +270,10 @@ if(MEDIA_BUILD_CONTROLLER)
         target_sources(vn-mediabus-controller PRIVATE libs/win32/rc/controller.rc)
         target_compile_definitions(vn-mediabus-controller PRIVATE
             MEDIABUS_ICON="${CMAKE_SOURCE_DIR}/assets/icon/icon.ico")
+        # Windows subsystem, like the Player: no console window appears beside
+        # the panel. See the note on the Player's target above for why that does
+        # not cost the command-line modes (`--help`, --list-scripts`).
+        set_target_properties(vn-mediabus-controller PROPERTIES WIN32_EXECUTABLE TRUE)
     endif()
     # The view lives beside the application it draws, so "view/ControllerView.h"
     # resolves without the app having to spell out the path.

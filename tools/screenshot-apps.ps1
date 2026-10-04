@@ -18,6 +18,10 @@ param(
     # show anything interesting, so it is the slower of the two.
     [switch]$ControllerOnly,
     [switch]$DashboardOnly,
+    # Which Dashboard tab to photograph. The Scripts tab only has content when
+    # the Controller is up, so asking for it also starts one.
+    [ValidateSet('applications', 'scripts', 'activity')]
+    [string]$Tab = 'applications',
     # Wait this long after a window appears before capturing it, so ImGui has
     # laid out and the first frame has been presented.
     [int]$SettleSeconds = 3
@@ -163,15 +167,11 @@ Start-Sleep -Milliseconds 600
 
 $started = @()
 try {
-    if (-not $ControllerOnly) {
-        $dash = Start-Process -FilePath (Join-Path $Bin 'vn-mediabus-dashboard.exe') `
-            -ArgumentList '--no-tray' -WorkingDirectory $Bin `
-            -RedirectStandardError (Join-Path $Out 'dashboard.err') -PassThru
-        $started += $dash.Id
-        Start-Sleep -Seconds 2
-    }
-
-    if (-not $DashboardOnly) {
+    # The Controller goes up FIRST when the Scripts tab is the subject: that tab
+    # reads its list from the Controller's API, so with no Controller it correctly
+    # shows "The Controller is not running" instead of any scripts.
+    $needController = (-not $DashboardOnly) -or ($Tab -eq 'scripts')
+    if ($needController) {
         $ctrl = Start-Process -FilePath (Join-Path $Bin 'vn-mediabus-controller.exe') `
             -ArgumentList '--start-offline' -WorkingDirectory $Bin `
             -RedirectStandardError (Join-Path $Out 'controller.err') -PassThru
@@ -180,13 +180,20 @@ try {
     }
 
     if (-not $ControllerOnly) {
+        $dash = Start-Process -FilePath (Join-Path $Bin 'vn-mediabus-dashboard.exe') `
+            -ArgumentList "--no-tray --tab $Tab" -WorkingDirectory $Bin `
+            -RedirectStandardError (Join-Path $Out 'dashboard.err') -PassThru
+        $started += $dash.Id
+        Start-Sleep -Seconds 3
+    }
+
+    if (-not $ControllerOnly) {
         Save-WindowShot -ProcessName 'vn-mediabus-dashboard' `
-            -FileName 'dashboard.png' -Label 'dashboard' | Out-Null
+            -FileName 'dashboard.png' -Label "dashboard/$Tab" | Out-Null
     }
     if (-not $DashboardOnly) {
-        # The Controller is given a Player to talk to when one is running; with
-        # --start-offline it shows the offline state, which is the honest picture
-        # of a Controller whose Player is not up.
+        # With --start-offline the Controller shows the offline state, which is
+        # the honest picture of a Controller whose Player is not up.
         Save-WindowShot -ProcessName 'vn-mediabus-controller' `
             -FileName 'controller.png' -Label 'controller' | Out-Null
     }

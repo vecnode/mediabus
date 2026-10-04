@@ -205,6 +205,11 @@ int main(int argc, char** argv) {
 	// never flushes a redirected stdout).
 	std::setvbuf(stdout, nullptr, _IONBF, 0);
 	media::log::setThresholdFromEnv();
+	// This binary is a Windows-subsystem application, so when it is started from
+	// Explorer - or by the launcher - there is no console and stderr goes
+	// nowhere. Deciding the sink now names the log file after the application
+	// rather than after whichever line happened to be written first.
+	media::log::useFileSink("player");
 
 	Options options;
 	if (!parseOptions(argc, argv, options)) {

@@ -286,6 +286,9 @@ media::TransportExecutor::FolderChoice chooseFolderDialog(
 int main(int argc, char** argv) {
 	std::setvbuf(stdout, nullptr, _IONBF, 0);
 	media::log::setThresholdFromEnv();
+	// Windows-subsystem binary: with no console to write to, the log goes to
+	// bin/mediabus-controller.log. See core/Log.cpp.
+	media::log::useFileSink("controller");
 
 	Options options;
 	if (!parseOptions(argc, argv, options)) {

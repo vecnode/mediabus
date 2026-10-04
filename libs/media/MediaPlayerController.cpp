@@ -72,7 +72,7 @@ std::vector<scripts::ScriptFile> MediaPlayerController::rescanScripts() {
 	return scripts_;
 }
 
-bool MediaPlayerController::openClipAtIndex(std::size_t index) {
+bool MediaPlayerController::openClipAtIndex(std::size_t index, bool autoplay) {
 	if (index >= clipCount()) {
 		LOG_WARN("Controller") << "clip index " << index << " out of range ("
 			<< clipCount() << " clips)";
@@ -81,7 +81,7 @@ bool MediaPlayerController::openClipAtIndex(std::size_t index) {
 
 	if (backend_ != nullptr) {
 		const MediaClip& clip = clips_.clipAt(index);
-		if (!backend_->open(clip)) {
+		if (!backend_->open(clip, autoplay)) {
 			LOG_WARN("Controller") << "backend refused to open " << clip.displayName;
 			return false;
 		}
@@ -93,7 +93,8 @@ bool MediaPlayerController::openClipAtIndex(std::size_t index) {
 	notifyClipChanged();
 	LOG_NOTICE("Controller") << "Opened [" << index << "] "
 		<< clips_.clipAt(index).displayName << " ("
-		<< toString(clips_.clipAt(index).mediaType) << ")";
+		<< toString(clips_.clipAt(index).mediaType) << ")"
+		<< (autoplay ? " and started it" : ", held on its first frame");
 	return true;
 }
 

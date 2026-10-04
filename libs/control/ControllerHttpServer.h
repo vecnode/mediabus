@@ -25,6 +25,7 @@ class LuaControllerScript;
 ///
 /// Routes (all localhost-only, like the Player's):
 ///
+///   GET  /api/health                        liveness, matching the Player's
 ///   GET  /api/controller/status             bar + player state
 ///   GET  /api/controller/scripts            scripts on disk, and which is loaded
 ///   GET  /api/controller/script-content     ?name=x.lua - the text of one script

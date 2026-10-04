@@ -171,12 +171,13 @@ private:
 // ---------------------------------------------------------------------------
 class RecordingBackend final : public media::IPlaybackBackend {
 public:
-	bool open(const media::MediaClip& clip) override {
+	bool open(const media::MediaClip& clip, bool autoplay) override {
 		if (failNextOpen) {
 			failNextOpen = false;
 			return false;
 		}
 		opened = clip.displayName;
+		autoplayed = autoplay;
 		state_ = media::TransportState{};
 		state_.loaded = true;
 		state_.isImage = clip.mediaType == media::ClipMediaType::Image;
@@ -193,6 +194,12 @@ public:
 			state_.duration = 60.0;
 			state_.seekable = true;
 			state_.position = 0.0;
+			// MPVSurface primes a paused first frame and un-pauses it only when
+			// the caller asked to autoplay. Mirroring that is the whole point of
+			// this stub: a version that always came back playing would hide the
+			// bug where nothing asked.
+			state_.playing = autoplay;
+			state_.paused = !autoplay;
 		}
 		return true;
 	}
@@ -224,6 +231,9 @@ public:
 
 	media::TransportState state_{};
 	std::string opened;
+	/// What the last open() was told about starting playback, so a test can
+	/// assert the caller actually asked rather than assuming it did.
+	bool autoplayed = false;
 	double lastSeek = 0.0;
 	bool failNextOpen = false;
 	std::vector<media::scripts::ScriptFile> scripts_;

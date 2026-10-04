@@ -203,6 +203,15 @@ try {
 
     Say "controller -> hud off     : $((Post-Json "http://127.0.0.1:$ControllerPort/api/controller/command" '{"command":"toggle-hud"}') | ConvertTo-Json -Compress -Depth 2)"
     Start-Sleep -Seconds 1
+    $ctrlHealth = Get-Json "http://127.0.0.1:$ControllerPort/api/health"
+    Say "controller /api/health   : $($ctrlHealth | ConvertTo-Json -Compress)"
+    # The Dashboard probes BOTH applications with the same /api/health. The
+    # Controller did not serve it, so the launcher always decided the Controller
+    # was down and disabled everything that depends on it - the script editor
+    # most visibly. This check exists so that cannot come back silently.
+    Check 'controller health route' ($ctrlHealth.ok -eq $true) "$($ctrlHealth | ConvertTo-Json -Compress)"
+
+    Start-Sleep -Seconds 1
     $hudNow = (Get-Json "http://127.0.0.1:$PlayerPort/api/status").hudVisible
     Check 'controller HUD reaches' ($hudNow -eq $false) "player hudVisible=$hudNow"
     Post-Json "http://127.0.0.1:$ControllerPort/api/controller/command" '{"command":"toggle-hud"}' | Out-Null

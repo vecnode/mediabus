@@ -250,18 +250,27 @@ void ControllerPanel::drawTransport(ControllerModel& model, Frame& frame) {
 	}
 
 	// --- volume and speed ---------------------------------------------------
-	// Both are drafts while the operator holds them, for the same reason the seek
-	// bar is: the poll thread keeps publishing the Player's own value, and the
-	// widget must not snap back under the operator's hand. A draft is dropped as
-	// soon as the widget is neither held nor hovered, so a change made elsewhere
-	// - by a Lua script, say - appears here.
+	//
+	// The draft is kept while the operator is working the control, and only
+	// replaced when the PLAYER'S OWN value changes. It used to be reset from the
+	// player whenever the widget was not held or hovered, which broke the control
+	// outright: ImGui deactivates a slider on the same frame the mouse is
+	// released, so the draft was thrown away and the handle snapped back to the
+	// player's old value - and the new value was sent from the discarded draft,
+	// so the player received a number the operator never chose and the handle
+	// never moved. Volume and speed both did this.
+	//
+	// Comparing against the last value SEEN from the player is what makes an
+	// external change (a Lua script, say) still show up here, without fighting
+	// the operator's hand.
 	const double zero = 0.0;
 	const double hundred = 100.0;
 	const double slowest = 0.1;
 	const double fastest = 4.0;
 
-	if (volumeDraft_ < 0.0) {
+	if (volumeDraft_ < 0.0 || std::abs(s.volume - playerVolume_) > 0.01) {
 		volumeDraft_ = s.volume;
+		playerVolume_ = s.volume;
 	}
 	ImGui::AlignTextToFramePadding();
 	ImGui::TextDisabled("Volume");
@@ -269,13 +278,16 @@ void ControllerPanel::drawTransport(ControllerModel& model, Frame& frame) {
 	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
 	ImGui::SliderScalar("##volume", ImGuiDataType_Double, &volumeDraft_, &zero, &hundred,
 		"vol %.0f%%", ImGuiSliderFlags_AlwaysClamp);
-	if (!ImGui::IsItemActive() && !ImGui::IsItemHovered()) {
-		volumeDraft_ = s.volume;
-	}
-	if (ImGui::IsItemDeactivatedAfterEdit()) {
-		frame.action.valid = true;
-		frame.action.settingVolume = true;
-		frame.action.volume = volumeDraft_;
+	// Sent while the operator drags, not only on release: a slider that only acts
+	// when the mouse comes up feels broken, and the Player coalesces a rapid
+	// stream of volume sets harmlessly.
+	if (ImGui::IsItemActive() || ImGui::IsItemDeactivatedAfterEdit()) {
+		if (std::abs(volumeDraft_ - sentVolume_) > 0.01) {
+			sentVolume_ = volumeDraft_;
+			frame.action.valid = true;
+			frame.action.settingVolume = true;
+			frame.action.volume = volumeDraft_;
+		}
 	}
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("Volume %d%%  (the Player reports %.0f%%)",
@@ -283,26 +295,35 @@ void ControllerPanel::drawTransport(ControllerModel& model, Frame& frame) {
 	}
 
 	ImGui::SameLine();
-	if (speedDraft_ < 0.0) {
+	if (speedDraft_ < 0.0 || std::abs(s.speed - playerSpeed_) > 0.005) {
 		speedDraft_ = s.speed;
+		playerSpeed_ = s.speed;
 	}
 	ImGui::AlignTextToFramePadding();
 	ImGui::TextDisabled("Speed");
 	ImGui::SameLine();
-	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
+	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
 	ImGui::SliderScalar("##speed", ImGuiDataType_Double, &speedDraft_, &slowest, &fastest,
 		"%.2fx", ImGuiSliderFlags_AlwaysClamp);
-	if (!ImGui::IsItemActive() && !ImGui::IsItemHovered()) {
-		speedDraft_ = s.speed;
-	}
-	if (ImGui::IsItemDeactivatedAfterEdit()) {
-		frame.action.valid = true;
-		frame.action.settingSpeed = true;
-		frame.action.speed = speedDraft_;
+	if (ImGui::IsItemActive() || ImGui::IsItemDeactivatedAfterEdit()) {
+		if (std::abs(speedDraft_ - sentSpeed_) > 0.005) {
+			sentSpeed_ = speedDraft_;
+			frame.action.valid = true;
+			frame.action.settingSpeed = true;
+			frame.action.speed = speedDraft_;
+		}
 	}
 	if (ImGui::IsItemHovered()) {
 		ImGui::SetTooltip("Playback speed (the Player reports %.2fx)", s.speed);
 	}
+
+	// A one-line status of what the Player itself says about the transport, so
+	// the effect of a click is visible rather than inferred from a position that
+	// only moves once a second.
+	ImGui::TextDisabled("%s%s%s",
+		s.loaded ? (s.isImage ? "image" : "clip loaded") : "nothing loaded",
+		s.isImage ? "" : (s.playing && !s.paused ? " - playing" : " - paused"),
+		s.seekable ? " - seekable" : "");
 }
 
 void ControllerPanel::drawSeek(const ControllerModel& model, Frame& frame) {

@@ -42,6 +42,11 @@ mediabus.ini
 bin/mediabus-ui.ini
 mediabus-ui.ini
 
+# The applications are Windows-subsystem binaries: with no console attached they
+# write their log next to themselves. One per application, per run.
+bin/mediabus-*.log
+mediabus-*.log
+
 # ---------------------------------------------------------------------------
 # Logs and scratch
 # ---------------------------------------------------------------------------

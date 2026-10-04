@@ -67,7 +67,15 @@ public:
 	virtual ~IPlaybackBackend() = default;
 
 	/// Open `clip` and decode its first frame; return false if it cannot load.
-	virtual bool open(const MediaClip& clip) = 0;
+	///
+	/// `autoplay` is what the caller MEANS, and it has to be said explicitly.
+	/// Opening a file and starting it are two different intentions: picking a clip
+	/// from a list is "play this", while the backend's own priming wants a still
+	/// frame to display. The implementation pauses to get that frame either way,
+	/// so a caller that wants playback has to ask for it - and before this
+	/// parameter existed, nothing did, which is why every clip opened paused and
+	/// the transport looked broken.
+	virtual bool open(const MediaClip& clip, bool autoplay) = 0;
 	virtual void close() = 0;
 
 	virtual void play() = 0;
@@ -110,7 +118,15 @@ public:
 	void stop();
 	void nextClip();
 	void previousClip();
-	bool openClipAtIndex(std::size_t index);
+
+	/// Open one entry of the playlist.
+	///
+	/// `autoplay` defaults to true because every caller that names a clip means
+	/// "play this one" - the route behind a control bar's clip list, the next and
+	/// previous transports, and startup. Passing false opens it and holds the
+	/// first frame, which is what a host wants when it is about to issue its own
+	/// transport command and does not want a burst of audio first.
+	bool openClipAtIndex(std::size_t index, bool autoplay = true);
 
 	// Transport additions.
 	bool seekAbsolute(double seconds);

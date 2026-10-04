@@ -80,7 +80,7 @@ public:
 	static unsigned long clientApiVersion();
 
 	// --- IPlaybackBackend -------------------------------------------------
-	bool open(const MediaClip& clip) override;
+	bool open(const MediaClip& clip, bool autoplay) override;
 	void close() override;
 	void play() override;
 	void pause() override;
@@ -122,7 +122,6 @@ private:
 	int videoWidth_ = 0;
 	int videoHeight_ = 0;
 
-	bool playing_ = false;
 	bool paused_ = true;
 	bool subtitlesEnabled_ = true;
 	/// Whether the current clip is a still. A held image is not seekable and is

@@ -340,6 +340,28 @@ bool ControllerHttpServer::start(int port) {
 		dispatch(res, Request{});
 	});
 
+	// The liveness route, matching the Player's `/api/health`.
+	//
+	// This was missing, and the Dashboard probes BOTH ports with the same
+	// `/api/health` - so it always decided the Controller was down, and every
+	// part of its interface that depends on the Controller being up (the script
+	// editor, most visibly) reported "not running" while the Controller was
+	// answering perfectly well on its own status route.
+	//
+	// Answered directly rather than through the command queue, because liveness
+	// must not depend on the frame loop being free: an app that is up but busy
+	// still has to be able to say so. The loopback guard still applies - it is
+	// this API's whole security boundary.
+	server->Get("/api/health", [](const httplib::Request& req, httplib::Response& res) {
+		res.set_header("Access-Control-Allow-Origin", "*");
+		if (!isLoopback(req.remote_addr)) {
+			res.status = 403;
+			res.set_content(errorJson("localhost only").dump(), "application/json");
+			return;
+		}
+		res.set_content(Json{{"ok", true}}.dump(), "application/json");
+	});
+
 	server->Get("/api/controller/scripts", [guard, dispatch](
 		const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;

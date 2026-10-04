@@ -112,25 +112,38 @@ DashboardPanel::Frame DashboardPanel::draw(ui::UiLayer& ui, const DashboardModel
 	// --- tabs --------------------------------------------------------------
 	// Applications is first because it is what the launcher is for; Scripts
 	// second because editing a script is the thing an operator comes back for.
+	//
+	// Which tab is OPEN is Dear ImGui's state, not this class's. A setTab()
+	// request is therefore handed over as ImGuiTabItemFlags_SetSelected on one
+	// frame and then forgotten - mirroring a tab index into `tab_` did not work,
+	// because the first frame opened Applications and overwrote the request
+	// before it could take effect.
+	const auto selectFlags = [this](Tab which) {
+		return (applyRequestedTab_ && tab_ == which) ? ImGuiTabItemFlags_SetSelected : 0;
+	};
 	if (ImGui::BeginTabBar("##tabs")) {
-		if (ImGui::BeginTabItem("Applications")) {
-			tab_ = Tab::Applications;
+		if (ImGui::BeginTabItem("Applications", nullptr, selectFlags(Tab::Applications))) {
+			frame.tab = Tab::Applications;
 			drawApplications(model, frame);
 			ImGui::EndTabItem();
 		}
-		if (ImGui::BeginTabItem("Scripts")) {
-			tab_ = Tab::Scripts;
+		if (ImGui::BeginTabItem("Scripts", nullptr, selectFlags(Tab::Scripts))) {
+			frame.tab = Tab::Scripts;
 			drawScripts(model, library, document, controllerOnline, frame);
 			ImGui::EndTabItem();
 		}
-		if (ImGui::BeginTabItem("Activity")) {
-			tab_ = Tab::Log;
+		if (ImGui::BeginTabItem("Activity", nullptr, selectFlags(Tab::Log))) {
+			frame.tab = Tab::Log;
 			drawLog(model);
 			ImGui::EndTabItem();
 		}
 		ImGui::EndTabBar();
+	} else {
+		frame.tab = tab_;
 	}
-	frame.tab = tab_;
+	// The request has been delivered (or there was no tab bar to deliver it to,
+	// in which case it is still the best answer available).
+	applyRequestedTab_ = false;
 
 	// Esc closes the launcher window. Whether that hides it or exits is the
 	// application's decision - it depends on whether a tray icon exists - so it
@@ -238,7 +251,13 @@ void DashboardPanel::drawCorpus(const DashboardModel& model, Frame& frame) {
 	const DashboardCorpus& corpus = model.corpus();
 	const float buttonWidth = ImGui::GetFontSize() * 7.0f;
 
-	ImGui::BeginChild("##corpus", ImVec2(0.0f, ImGui::GetFontSize() * 4.4f),
+	// The card has to hold three things: the name line with its status pill, the
+	// "running - libmpv video and audio - API :8080" line, and the button row
+	// under them. At 4.4 font-heights the button row fell outside the card and
+	// the Change... button was invisible - a card that clips its own call to
+	// action. 6.4 leaves room for all three at any font size, because the height
+	// is expressed in font-heights rather than in pixels.
+	ImGui::BeginChild("##corpus", ImVec2(0.0f, ImGui::GetFontSize() * 6.4f),
 		ImGuiChildFlags_Borders);
 
 	ImGui::TextUnformatted("Media folder");

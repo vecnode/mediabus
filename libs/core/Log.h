@@ -27,6 +27,23 @@ bool enabled(Level level);
 
 void setThresholdFromEnv();
 
+/// Choose the log's destination explicitly, rather than on the first line.
+///
+/// Normally there is no need to call this: the first logged line does it. It
+/// exists for a caller that wants the decision made - and the log file opened -
+/// before anything is written, so a startup failure is never the thing that
+/// arrives without a destination.
+///
+/// The destination is stderr when the process has a console or its stderr has
+/// been redirected (a shell, a script), and `<exeDir>/mediabus-<name>.log`
+/// otherwise. `name` is the application, and it names that file.
+void useFileSink(const char* name);
+
+/// Write one finished line to whichever sink is in use. Exposed so a caller that
+/// has its own message to emit - the ImGui assert path, for instance - goes to
+/// the same place as everything else instead of to a stderr that may not exist.
+void writeLine(const char* level, const char* category, const std::string& text);
+
 /// Accumulates one message and emits it on destruction, so a statement is
 /// always a single atomic line even when several threads log at once.
 class Line {

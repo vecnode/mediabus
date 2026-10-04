@@ -73,9 +73,21 @@ private:
 	double seekDraft_ = 0.0;
 	bool seekDragging_ = false;
 
-	// Volume and speed follow the same rule for the same reason.
+	// The volume and speed controls need three numbers each, for the same reason:
+	//
+	//   draft   what the operator is setting right now (the widget's value)
+	//   seen    the value the PLAYER last reported, so an external change still
+	//           shows up here
+	//   sent    the value already dispatched, so a held slider does not post the
+	//           same number sixty times a second
+	//
+	// -1 for a draft means "nothing has been read from the Player yet".
 	double volumeDraft_ = -1.0;
+	double playerVolume_ = -1.0;
+	double sentVolume_ = -1.0;
 	double speedDraft_ = -1.0;
+	double playerSpeed_ = -1.0;
+	double sentSpeed_ = -1.0;
 };
 
 } // namespace media
