@@ -1,4 +1,4 @@
-# mediaplayer-app
+# mediabus
 
 ![Language: C++17](https://img.shields.io/badge/language-C%2B%2B17-blue.svg)
 ![License: GPL-2.0-or-later](https://img.shields.io/badge/license-GPL--2.0--or--later-blue.svg)
