@@ -2,12 +2,11 @@
 
 /// Minimal logging facade.
 ///
-/// Deliberately tiny: the openFrameworks build used `ofLogNotice("X") << ...`
-/// throughout, and this preserves that call shape so the ported code reads the
-/// same without dragging in a logging framework.
+/// Deliberately tiny: one stream-style statement per line, with no logging
+/// framework behind it. Both applications share it.
 ///
 /// Usage:
-///     log::notice("HttpControlServer") << "listening on port " << port;
+///     LOG_NOTICE("HttpControlServer") << "listening on port " << port;
 ///
 /// Output goes to stderr so stdout stays clean for structured output.
 

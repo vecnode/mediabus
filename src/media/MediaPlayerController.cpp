@@ -3,32 +3,8 @@
 #include "core/Log.h"
 
 #include <cmath>
-#include <random>
 
 namespace media {
-namespace {
-
-/// Clip switch selection: matches the original behaviour of avoiding an
-/// immediate repeat rather than a uniform draw that may pick the same clip.
-std::size_t randomOtherThan(std::size_t current, std::size_t count) {
-	if (count < 2) {
-		return 0;
-	}
-	static thread_local std::mt19937 rng{std::random_device{}()};
-	std::uniform_int_distribution<std::size_t> dist(0, count - 1);
-	std::size_t target = current;
-	// Bounded retry: with count >= 2 this terminates almost immediately, and
-	// the loop cap keeps a pathological RNG from spinning forever.
-	for (int attempt = 0; attempt < 64 && target == current; ++attempt) {
-		target = dist(rng);
-	}
-	if (target == current) {
-		target = (current + 1) % count;
-	}
-	return target;
-}
-
-} // namespace
 
 MediaPlayerController::MediaPlayerController(IClipSource& clips, IPlaybackBackend* backend)
 	: clips_(clips), backend_(backend) {}
@@ -53,9 +29,9 @@ void MediaPlayerController::syncSubtitleText() {
 		subtitleText_ = subtitleOverride_;
 		return;
 	}
-	// No OCR corpus in this build: the on-screen text is whatever the media
-	// itself carries (mpv renders embedded/sidecar subtitles directly), so the
-	// status field simply mirrors the override, or stays empty.
+	// The on-screen text is whatever the media itself carries: mpv renders
+	// embedded and sidecar subtitles directly into the frame, so this status
+	// field only ever mirrors an explicit host-supplied override.
 	subtitleText_.clear();
 }
 
@@ -146,17 +122,6 @@ void MediaPlayerController::previousClip() {
 	openClipAtIndex(clips_.previousIndex(currentIndex_));
 }
 
-void MediaPlayerController::randomClip() {
-	if (clipCount() == 0) {
-		return;
-	}
-	if (clipCount() == 1) {
-		openClipAtIndex(0);
-		return;
-	}
-	openClipAtIndex(randomOtherThan(currentIndex_, clipCount()));
-}
-
 bool MediaPlayerController::seekAbsolute(double seconds) {
 	if (backend_ == nullptr || !loaded_ || !std::isfinite(seconds) || seconds < 0.0) {
 		return false;
@@ -237,47 +202,6 @@ bool MediaPlayerController::isSubtitlesEnabled() const {
 	return true;
 }
 
-bool MediaPlayerController::setShowRegionBBox(bool enabled) {
-	showRegionBBox_ = enabled;
-	return true;
-}
-
-bool MediaPlayerController::showRegionBBox() const {
-	return showRegionBBox_;
-}
-
-bool MediaPlayerController::setRegionFocusEnabled(bool enabled) {
-	regionFocusEnabled_ = enabled;
-	if (enabled) {
-		regionPanEnabled_ = false;
-	}
-	return true;
-}
-
-bool MediaPlayerController::regionFocusEnabled() const {
-	return regionFocusEnabled_;
-}
-
-bool MediaPlayerController::setRegionPanEnabled(bool enabled) {
-	regionPanEnabled_ = enabled;
-	if (enabled) {
-		regionFocusEnabled_ = false;
-	}
-	return true;
-}
-
-bool MediaPlayerController::regionPanEnabled() const {
-	return regionPanEnabled_;
-}
-
-bool MediaPlayerController::setAnimationsEnabled(bool enabled) {
-	animationsEnabled_ = enabled;
-	return true;
-}
-
-bool MediaPlayerController::animationsEnabled() const {
-	return animationsEnabled_;
-}
 
 MediaPlayerStatus MediaPlayerController::getStatus() const {
 	MediaPlayerStatus status;

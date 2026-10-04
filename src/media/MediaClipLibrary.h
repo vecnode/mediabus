@@ -9,7 +9,7 @@ namespace media {
 
 /// Discovers images and videos from disk (default IClipSource implementation).
 ///
-/// Behaviour preserved from the openFrameworks build:
+/// Ordering and resolution rules:
 ///   - roots are resolved relative to the executable, not the cwd;
 ///   - only `<exeDir>/data` is scanned (not the whole bin/ tree);
 ///   - images sort before videos, then by absolute path;

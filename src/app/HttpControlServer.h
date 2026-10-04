@@ -9,10 +9,30 @@ namespace media {
 
 class MediaPlayerController;
 
+/// Window presentation the host owns and the API may toggle.
+///
+/// The render loop lives in main.cpp, so the HTTP layer must never reach for
+/// it directly. The host instead supplies these two closures, and every route
+/// that touches presentation (`/api/hud`, `/api/fullscreen`) goes through them
+/// on the main thread, exactly like every other command.
+///
+/// Both closures are optional: when one is unset the corresponding route
+/// answers with an error instead of pretending to work. That keeps the tests
+/// able to construct a server without a window.
+struct PresentationHooks {
+	/// Current HUD visibility.
+	std::function<bool()> getHud;
+	/// Set HUD visibility. Returns false when the host refused.
+	std::function<bool(bool)> setHud;
+	/// Current fullscreen state.
+	std::function<bool()> getFullscreen;
+	/// Set fullscreen state. Returns false when the host refused.
+	std::function<bool(bool)> setFullscreen;
+};
+
 /// Localhost-only JSON control API.
 ///
-/// Threading contract (preserved from the openFrameworks build, and the reason
-/// the API stays safe):
+/// Threading contract (the reason the API stays safe):
 ///   - HTTP worker threads never touch the controller or the decoder.
 ///   - A handler submits a closure to a queue and blocks until the poll()ing
 ///     main thread has run it and handed back the response.
@@ -25,7 +45,8 @@ public:
 	static constexpr int kDefaultPort = 8080;
 	static constexpr const char* kDefaultBindHint = "127.0.0.1";
 
-	explicit HttpControlServer(MediaPlayerController& controller);
+	explicit HttpControlServer(MediaPlayerController& controller,
+		PresentationHooks hooks = {});
 	~HttpControlServer();
 
 	HttpControlServer(const HttpControlServer&) = delete;

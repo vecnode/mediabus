@@ -44,8 +44,8 @@ struct MediaPlayerClipInfo {
 	std::string mediaType;
 };
 
-/// Transport state the controller exposes. P4 replaces the placeholder
-/// implementation behind this interface with the libmpv surface.
+/// Transport state the controller exposes. The libmpv surface implements the
+/// IPlaybackBackend side of this; tests substitute their own backend.
 struct TransportState {
 	bool loaded = false;
 	bool playing = false;
@@ -72,7 +72,7 @@ public:
 
 	virtual void play() = 0;
 	virtual void pause() = 0;
-	/// Stop and hold a preview frame (the openFrameworks primeFirstFrame step).
+	/// Stop and hold the current frame as a still preview.
 	virtual void stopToPreview() = 0;
 
 	virtual TransportState state() const = 0;
@@ -110,7 +110,6 @@ public:
 	void stop();
 	void nextClip();
 	void previousClip();
-	void randomClip();
 	bool openClipAtIndex(std::size_t index);
 
 	// Transport additions.
@@ -136,15 +135,6 @@ public:
 	/// Re-scan the scripts directory. Reports the new list; scripts already
 	/// running keep running, because mpv cannot unload a script in place.
 	std::vector<scripts::ScriptFile> rescanScripts();
-
-	bool setShowRegionBBox(bool enabled);
-	bool showRegionBBox() const;
-	bool setRegionFocusEnabled(bool enabled);
-	bool regionFocusEnabled() const;
-	bool setRegionPanEnabled(bool enabled);
-	bool regionPanEnabled() const;
-	bool setAnimationsEnabled(bool enabled);
-	bool animationsEnabled() const;
 
 	MediaPlayerStatus getStatus() const;
 	std::string getSubtitleText() const;
@@ -175,11 +165,6 @@ private:
 
 	std::string subtitleOverride_;
 	std::string subtitleText_;
-
-	bool showRegionBBox_ = false;
-	bool regionFocusEnabled_ = false;
-	bool regionPanEnabled_ = false;
-	bool animationsEnabled_ = true;
 
 	ClipChangedHandler clipChangedHandler_ = nullptr;
 	void* clipChangedUserData_ = nullptr;

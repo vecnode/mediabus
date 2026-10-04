@@ -7,7 +7,13 @@
 param(
     [switch]$Clean,
     [switch]$ConfigureOnly,
-    [switch]$Run
+    [switch]$Run,
+    [switch]$RunController,
+    [switch]$RunDashboard,
+    # Which GUI to launch with -Run. Player is the default because it is the
+    # one that shows something.
+    [ValidateSet('Player', 'Controller', 'Dashboard')]
+    [string]$App = 'Player'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,6 +30,15 @@ $env:CXX = 'g++'
 
 $Repo = $PSScriptRoot
 $BuildDir = Join-Path $Repo 'build'
+
+# The three applications this tree produces. They must all exist after a build:
+# the Dashboard locates the other two beside itself, so a partial build would
+# leave it with buttons that cannot work.
+$Exes = [ordered]@{
+    Player     = 'bin\media-player-cpp.exe'
+    Controller = 'bin\media-controller-cpp.exe'
+    Dashboard  = 'bin\media-dashboard-cpp.exe'
+}
 
 # MSYS2 mingw64 has no cmake package on this machine, so use the native
 # Windows CMake and tell it which toolchain to drive. Ninja is in MSYS2.
@@ -60,30 +75,43 @@ Write-Host "`n>>> building"
 & $Cmake --build $BuildDir
 if ($LASTEXITCODE -ne 0) { throw "build failed: $LASTEXITCODE" }
 
-$exe = Join-Path $Repo 'bin\media-player-cpp.exe'
-if (-not (Test-Path $exe)) { throw "expected binary not found: $exe" }
-Write-Host "`nbuilt: $exe"
+$built = @()
+foreach ($name in $Exes.Keys) {
+    $path = Join-Path $Repo $Exes[$name]
+    if (-not (Test-Path $path)) {
+        throw "$name binary not found: $path`nThe Dashboard needs all three side by side; a partial build is not usable."
+    }
+    $built += $path
+}
+Write-Host ""
+foreach ($path in $built) { Write-Host "built: $path" }
 
 # ---------------------------------------------------------------------------
-# Stage the MinGW runtime next to the binary.
+# Stage the MinGW runtime next to the binaries.
 #
-# Without this, bin\media-player-cpp.exe only runs if MSYS2 happens to be on
-# PATH; launched any other way (from Explorer, a shortcut, a controller that
-# sets its own environment) Windows fails to resolve libgcc_s_seh-1,
-# libwinpthread-1, libstdc++-6, glew32 and glfw3, and the process dies before
-# main() with 0xC0000135 and no message at all. The build should produce
-# something that actually runs.
+# Without this, the executables only run if MSYS2 happens to be on PATH;
+# launched any other way (from Explorer, a shortcut, the Dashboard) Windows
+# fails to resolve libgcc_s_seh-1, libwinpthread-1, libstdc++-6, glew32 and
+# glfw3, and the process dies before main() with 0xC0000135 and no message at
+# all. The build should produce something that actually runs.
+#
+# Every binary is inspected, because each links a different closure: the Player
+# pulls libmpv, the Controller pulls Lua, the Dashboard pulls neither. The union
+# is what lands in bin\.
 #
 # libmpv-2.dll is already vendored in bin\; the rest comes from the toolchain.
 # These are build outputs, so they are git-ignored.
 # ---------------------------------------------------------------------------
 Write-Host "`n>>> staging MinGW runtime DLLs into bin\"
 $ldd = "$Msys\usr\bin\ldd.exe"
-$lddOutput = & $ldd $exe 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Warning "ldd failed; bin\ may not run outside an MSYS2 shell"
-} else {
-    $staged = 0
+$staged = 0
+$seen = @{}
+foreach ($path in $built) {
+    $lddOutput = & $ldd $path 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "ldd failed on $(Split-Path $path -Leaf); bin\ may not run outside an MSYS2 shell"
+        continue
+    }
     foreach ($line in $lddOutput) {
         if ($line -notmatch '=>\s+(\S+\.dll)') { continue }
         # ldd reports MSYS-style paths, not Windows ones:
@@ -101,13 +129,20 @@ if ($LASTEXITCODE -ne 0) {
         # Only the toolchain; never Windows system DLLs.
         if ($source -notlike "$Mingw\bin\*") { continue }
         Copy-Item $source (Join-Path $Repo 'bin') -Force
-        $staged++
+        if (-not $seen.ContainsKey($source)) {
+            $seen[$source] = $true
+            $staged++
+        }
     }
-    Write-Host "  staged $staged runtime DLL(s)"
 }
+Write-Host "  staged $staged runtime DLL(s)"
 
-if ($Run) {
-    Write-Host "`n>>> running (cwd = bin, so bin/data resolves)"
+if ($RunController) { $App = 'Controller' }
+if ($RunDashboard) { $App = 'Dashboard' }
+
+if ($Run -or $RunController -or $RunDashboard) {
+    $target = Join-Path $Repo $Exes[$App]
+    Write-Host "`n>>> running $App (cwd = bin, so bin/data resolves)"
     Push-Location (Join-Path $Repo 'bin')
-    try { & $exe } finally { Pop-Location }
+    try { & $target } finally { Pop-Location }
 }

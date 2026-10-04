@@ -4,6 +4,29 @@ Everything here was discovered the hard way while proving the libmpv stack on
 this machine. Two of these are silent-failure traps that cost real time; read
 both before building by hand.
 
+## 0. What gets built, and what each target needs
+
+One tree produces three applications plus the test binary. They are separate
+targets because their dependencies are genuinely different, and each can be
+switched off independently (`-DMEDIA_BUILD_APP=OFF`, `-DMEDIA_BUILD_CONTROLLER`,
+`-DMEDIA_BUILD_DASHBOARD`, `-DMEDIA_BUILD_TESTS`):
+
+| Target | Needs |
+|---|---|
+| `media-player-cpp` | GLFW, GLEW, OpenGL, the vendored libmpv |
+| `media-controller-cpp` | GLFW, GLEW, OpenGL, **Lua 5.1** (`lua5.1.pc`) |
+| `media-dashboard-cpp` | GLFW, GLEW, OpenGL |
+| `media_tests` | nothing graphical — it links the logic only |
+
+Lua 5.1 is the same Lua libmpv already ships, so the Controller adds no new
+runtime dependency to a bundle that includes the Player; CMake refuses to
+configure the Controller without it and says so. All three must be built
+together: the Dashboard locates the other two **by name in its own directory**.
+
+On a machine with only Windows PowerShell 5.1, `powershell -File build.ps1` is
+equivalent to the `pwsh` form used below — the scripts use no PowerShell 7
+feature.
+
 ## 1. `PATH` must be confined to MSYS2 (silent-failure trap)
 
 `g++.exe` reports its version fine, but **every compile exits 1 printing no

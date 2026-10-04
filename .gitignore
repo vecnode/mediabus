@@ -80,6 +80,13 @@ dist/
 # Generated: installed from scripts/media-player.lua by the build
 bin/data/scripts/media-player.lua
 
+# Generated: installed from scripts/controller-example.lua by the build. The
+# tracked source of truth is scripts/, exactly as for the Player's script.
+bin/data/controller-scripts/
+
+# Scratch output of tools/verify-live.ps1 (per-app logs and its transcript)
+bin/verify-live/
+
 # Scratch media directory created by tests/test_main.cpp (removed on teardown;
 # ignored as a safety net so a crashed test binary cannot dirty the tree)
 bin/tests-tmp-*/

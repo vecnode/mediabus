@@ -640,8 +640,19 @@ void MPVSurface::setVolume(double percent) {
 
 void MPVSurface::setScripts(const std::vector<scripts::ScriptFile>& scripts) {
 	if (mpv_ != nullptr) {
-		// Too late: mpv has already initialized and will not accept new scripts.
-		// Say so plainly rather than silently doing nothing.
+		// Re-sending the list that was queued before mpv_initialize() is not a
+		// late change — those scripts are already running. Returning quietly is
+		// what keeps a normal start from warning about scripts that did load,
+		// which made a working script path look broken in the log.
+		bool alreadyApplied = requestedScripts_.size() == scripts.size();
+		for (std::size_t i = 0; alreadyApplied && i < scripts.size(); ++i) {
+			alreadyApplied = requestedScripts_[i].absolutePath == scripts[i].absolutePath;
+		}
+		if (alreadyApplied) {
+			return;
+		}
+		// A genuinely different list: mpv has initialized and will not accept
+		// new scripts. Say so plainly rather than silently doing nothing.
 		LOG_WARN("MPVSurface") << "setScripts called after initialization; "
 			<< scripts.size() << " script(s) ignored until restart";
 		return;

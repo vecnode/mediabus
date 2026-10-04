@@ -1,5 +1,6 @@
 #include "app/HttpControlServer.h"
 
+#include "app/http/CommandQueue.h"
 #include "core/Log.h"
 #include "core/Platform.h"
 #include "media/IClipSource.h"
@@ -10,11 +11,9 @@
 #include "json.hpp"
 
 #include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <deque>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -27,13 +26,6 @@ namespace {
 using Json = nlohmann::json;
 
 constexpr std::size_t kMaxRequestBody = 8192;
-
-/// One unit of work submitted by an HTTP worker, executed on the main thread.
-struct Command {
-	std::function<Json()> run;
-	Json result;
-	bool done = false;
-};
 
 bool isLoopback(const std::string& ip) {
 	return ip == "127.0.0.1" || ip == "::1" || ip == "::ffff:127.0.0.1"
@@ -79,7 +71,8 @@ bool isInsideDirectory(const std::filesystem::path& candidate,
 	return true;
 }
 
-Json statusJson(const MediaPlayerStatus& status) {
+Json statusJson(const MediaPlayerStatus& status,
+	const PresentationHooks& hooks) {
 	return Json{
 		// frozen contract
 		{"loaded", status.loaded},
@@ -99,6 +92,11 @@ Json statusJson(const MediaPlayerStatus& status) {
 		{"paused", status.paused},
 		{"decoder", status.decoder},
 		{"scriptsLoaded", status.scriptsLoaded},
+		// additive: presentation the host owns. Reported as null when the host
+		// has no window (the test harness), so a client can tell "hidden" from
+		// "not applicable".
+		{"hudVisible", hooks.getHud ? Json(hooks.getHud()) : Json(nullptr)},
+		{"fullscreen", hooks.getFullscreen ? Json(hooks.getFullscreen()) : Json(nullptr)},
 	};
 }
 
@@ -106,29 +104,30 @@ Json errorJson(const std::string& message) {
 	return Json{{"ok", false}, {"error", message}};
 }
 
-Json okWithStatus(const MediaPlayerController& controller) {
-	return Json{{"ok", true}, {"status", statusJson(controller.getStatus())}};
+Json okWithStatus(const MediaPlayerController& controller,
+	const PresentationHooks& hooks) {
+	return Json{{"ok", true}, {"status", statusJson(controller.getStatus(), hooks)}};
 }
 
 } // namespace
 
 std::string statusToJsonText(const MediaPlayerController& controller) {
-	return statusJson(controller.getStatus()).dump();
+	return statusJson(controller.getStatus(), PresentationHooks{}).dump();
 }
 
 // ---------------------------------------------------------------------------
-// Impl: owns the queue, the httplib server and its listen thread.
+// Impl: owns the command queue, the httplib server and its listen thread.
+//
+// The queue itself is CommandQueue<Json>: HTTP workers submit closures and
+// block, poll() drains them on the main thread. See app/http/CommandQueue.h.
 // ---------------------------------------------------------------------------
 struct HttpControlServer::Impl {
-	explicit Impl(MediaPlayerController& c) : controller(c) {}
+	Impl(MediaPlayerController& c, PresentationHooks h)
+		: controller(c), hooks(std::move(h)) {}
 
 	~Impl() { stopServer(); }
 
-	std::mutex queueMutex;
-	std::condition_variable queueCv;    // wakes the main thread
-	std::condition_variable resultCv;   // wakes blocked workers
-	std::deque<std::shared_ptr<Command>> queue;
-	bool shuttingDown = false;
+	CommandQueue<Json> queue;
 
 	std::mutex serverMutex;
 	std::unique_ptr<httplib::Server> server;
@@ -136,72 +135,28 @@ struct HttpControlServer::Impl {
 	std::atomic<bool> running{false};
 
 	MediaPlayerController& controller;
+	/// The host's window state, reached only from the main thread.
+	PresentationHooks hooks;
 
 	/// Submit work and block until the main thread produces a result.
 	/// Returns nullopt when shutting down, so a worker can never wait forever
 	/// for a poll() that will not come.
 	std::optional<Json> submit(std::function<Json()> work) {
-		auto command = std::make_shared<Command>();
-		command->run = std::move(work);
-
-		{
-			std::unique_lock<std::mutex> lock(queueMutex);
-			if (shuttingDown) {
-				return std::nullopt;
-			}
-			queue.push_back(command);
-		}
-		queueCv.notify_one();
-
-		std::unique_lock<std::mutex> lock(queueMutex);
-		resultCv.wait(lock, [&] { return command->done || shuttingDown; });
-		if (!command->done) {
-			return std::nullopt;
-		}
-		return command->result;
+		return queue.submit(std::move(work));
 	}
 
-	/// Main thread: run everything queued, outside the lock so one long command
-	/// cannot stall other submitters.
+	/// Main thread: run everything queued.
 	void drain() {
-		std::deque<std::shared_ptr<Command>> batch;
-		{
-			std::lock_guard<std::mutex> lock(queueMutex);
-			batch.swap(queue);
-		}
-		for (auto& command : batch) {
-			Json result;
-			try {
-				result = command->run();
-			} catch (const std::exception& e) {
-				result = errorJson(std::string("command failed: ") + e.what());
-			}
-			{
-				std::lock_guard<std::mutex> lock(queueMutex);
-				command->result = std::move(result);
-				command->done = true;
-			}
-			resultCv.notify_all();
-		}
+		queue.drain(errorJson);
 	}
 
-	/// Main thread: block briefly when there is nothing to do. Keeps the API
-	/// responsive without busy-spinning the render loop.
+	/// Main thread: block briefly when there is nothing to do.
 	void waitForWork(int timeoutMs) {
-		std::unique_lock<std::mutex> lock(queueMutex);
-		if (!queue.empty() || shuttingDown) {
-			return;
-		}
-		queueCv.wait_for(lock, std::chrono::milliseconds(timeoutMs),
-			[&] { return !queue.empty() || shuttingDown; });
+		queue.waitForWork(timeoutMs);
 	}
 
 	void failAllWaiters() {
-		std::lock_guard<std::mutex> lock(queueMutex);
-		shuttingDown = true;
-		queue.clear();
-		resultCv.notify_all();
-		queueCv.notify_all();
+		queue.failAllWaiters();
 	}
 
 	void stopServer() {
@@ -220,8 +175,9 @@ struct HttpControlServer::Impl {
 // ---------------------------------------------------------------------------
 // HttpControlServer
 // ---------------------------------------------------------------------------
-HttpControlServer::HttpControlServer(MediaPlayerController& controller)
-	: impl_(std::make_unique<Impl>(controller)) {}
+HttpControlServer::HttpControlServer(MediaPlayerController& controller,
+	PresentationHooks hooks)
+	: impl_(std::make_unique<Impl>(controller, std::move(hooks))) {}
 
 HttpControlServer::~HttpControlServer() {
 	stop();
@@ -313,12 +269,12 @@ bool HttpControlServer::start(int port) {
 		res.set_content(Json{{"ok", true}}.dump(), "application/json");
 	});
 
-	server->Get("/api/status", [guard, dispatch](const httplib::Request& req, httplib::Response& res) {
+	server->Get("/api/status", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
-		dispatch(res, [](MediaPlayerController& c) { return statusJson(c.getStatus()); });
+		dispatch(res, [this](MediaPlayerController& c) { return statusJson(c.getStatus(), impl_->hooks); });
 	});
 
-	server->Get("/api/position", [guard, dispatch](const httplib::Request& req, httplib::Response& res) {
+	server->Get("/api/position", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		dispatch(res, [](MediaPlayerController& c) {
 			const MediaPlayerStatus s = c.getStatus();
@@ -327,7 +283,7 @@ bool HttpControlServer::start(int port) {
 		});
 	});
 
-	server->Get("/api/clips", [guard, dispatch](const httplib::Request& req, httplib::Response& res) {
+	server->Get("/api/clips", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		dispatch(res, [](MediaPlayerController& c) {
 			Json payload = Json::array();
@@ -340,32 +296,32 @@ bool HttpControlServer::start(int port) {
 	});
 
 	// ---- transport -------------------------------------------------------
-	server->Post("/api/play", [guard, dispatch](const httplib::Request& req, httplib::Response& res) {
+	server->Post("/api/play", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
-		dispatch(res, [](MediaPlayerController& c) { c.play(); return okWithStatus(c); });
+		dispatch(res, [this](MediaPlayerController& c) { c.play(); return okWithStatus(c, impl_->hooks); });
 	});
 
-	server->Post("/api/stop", [guard, dispatch](const httplib::Request& req, httplib::Response& res) {
+	server->Post("/api/stop", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
-		dispatch(res, [](MediaPlayerController& c) { c.stop(); return okWithStatus(c); });
+		dispatch(res, [this](MediaPlayerController& c) { c.stop(); return okWithStatus(c, impl_->hooks); });
 	});
 
-	server->Post("/api/next", [guard, dispatch](const httplib::Request& req, httplib::Response& res) {
+	server->Post("/api/next", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
-		dispatch(res, [](MediaPlayerController& c) { c.nextClip(); return okWithStatus(c); });
+		dispatch(res, [this](MediaPlayerController& c) { c.nextClip(); return okWithStatus(c, impl_->hooks); });
 	});
 
-	server->Post("/api/previous", [guard, dispatch](const httplib::Request& req, httplib::Response& res) {
+	server->Post("/api/previous", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
-		dispatch(res, [](MediaPlayerController& c) { c.previousClip(); return okWithStatus(c); });
+		dispatch(res, [this](MediaPlayerController& c) { c.previousClip(); return okWithStatus(c, impl_->hooks); });
 	});
 
-	server->Post("/api/pause", [guard, dispatch, parseBody](const httplib::Request& req, httplib::Response& res) {
+	server->Post("/api/pause", [this, guard, dispatch, parseBody](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		Json body = Json::object();
 		// A pause request with no body means "toggle".
 		if (!req.body.empty() && !parseBody(req, res, body)) return;
-		dispatch(res, [body](MediaPlayerController& c) -> Json {
+		dispatch(res, [this, body](MediaPlayerController& c) -> Json {
 			bool paused = !c.getStatus().paused;
 			if (body.contains("paused")) {
 				if (!body["paused"].is_boolean()) {
@@ -376,16 +332,16 @@ bool HttpControlServer::start(int port) {
 			if (!c.setPaused(paused)) {
 				return errorJson("pause rejected (nothing loaded)");
 			}
-			return okWithStatus(c);
+			return okWithStatus(c, impl_->hooks);
 		});
 	});
 
 	// ---- seek / rate / volume -------------------------------------------
-	server->Post("/api/seek", [guard, dispatch, parseBody](const httplib::Request& req, httplib::Response& res) {
+	server->Post("/api/seek", [this, guard, dispatch, parseBody](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		Json body;
 		if (!parseBody(req, res, body)) return;
-		dispatch(res, [body](MediaPlayerController& c) -> Json {
+		dispatch(res, [this, body](MediaPlayerController& c) -> Json {
 			bool ok = false;
 			if (body.contains("time") && body["time"].is_number()) {
 				ok = c.seekAbsolute(body["time"].get<double>());
@@ -399,11 +355,11 @@ bool HttpControlServer::start(int port) {
 			if (!ok) {
 				return errorJson("seek rejected (nothing loaded, or value out of range)");
 			}
-			return okWithStatus(c);
+			return okWithStatus(c, impl_->hooks);
 		});
 	});
 
-	server->Post("/api/speed", [guard, dispatch, parseBody](const httplib::Request& req, httplib::Response& res) {
+	server->Post("/api/speed", [this, guard, dispatch, parseBody](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		Json body;
 		if (!parseBody(req, res, body)) return;
@@ -413,15 +369,15 @@ bool HttpControlServer::start(int port) {
 			return;
 		}
 		const double speed = body["speed"].get<double>();
-		dispatch(res, [speed](MediaPlayerController& c) -> Json {
+		dispatch(res, [this, speed](MediaPlayerController& c) -> Json {
 			if (!c.setSpeed(speed)) {
 				return errorJson("speed out of range (0.01..100) or nothing loaded");
 			}
-			return okWithStatus(c);
+			return okWithStatus(c, impl_->hooks);
 		});
 	});
 
-	server->Post("/api/volume", [guard, dispatch, parseBody](const httplib::Request& req, httplib::Response& res) {
+	server->Post("/api/volume", [this, guard, dispatch, parseBody](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		Json body;
 		if (!parseBody(req, res, body)) return;
@@ -431,20 +387,20 @@ bool HttpControlServer::start(int port) {
 			return;
 		}
 		const double volume = body["volume"].get<double>();
-		dispatch(res, [volume](MediaPlayerController& c) -> Json {
+		dispatch(res, [this, volume](MediaPlayerController& c) -> Json {
 			if (!c.setVolume(volume)) {
 				return errorJson("volume out of range (0..100)");
 			}
-			return okWithStatus(c);
+			return okWithStatus(c, impl_->hooks);
 		});
 	});
 
 	// ---- subtitles -------------------------------------------------------
-	server->Post("/api/subtitles", [guard, dispatch, parseBody](const httplib::Request& req, httplib::Response& res) {
+	server->Post("/api/subtitles", [this, guard, dispatch, parseBody](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		Json body;
 		if (!parseBody(req, res, body)) return;
-		dispatch(res, [body](MediaPlayerController& c) -> Json {
+		dispatch(res, [this, body](MediaPlayerController& c) -> Json {
 			if (body.contains("enabled")) {
 				if (!body["enabled"].is_boolean()) {
 					return errorJson("\"enabled\" must be a boolean");
@@ -468,12 +424,66 @@ bool HttpControlServer::start(int port) {
 			return Json{{"ok", true},
 				{"subtitlesEnabled", c.isSubtitlesEnabled()},
 				{"subtitleText", c.getSubtitleText()},
-				{"status", statusJson(c.getStatus())}};
+				{"status", statusJson(c.getStatus(), impl_->hooks)}};
 		});
 	});
 
+	// ---- presentation ----------------------------------------------------
+	// The render loop belongs to main.cpp, so these routes only reach the
+	// window through the host's hooks. They are the surface the Controller
+	// uses to hide the Player's HUD and go fullscreen.
+	auto presentationRoute = [&server, guard, dispatch, parseBody](const std::string& path,
+		const std::function<bool()>& getter,
+		const std::function<bool(bool)>& setter) {
+		server->Get(path, [guard, dispatch, getter](
+			const httplib::Request& req, httplib::Response& res) {
+			if (!guard(req, res)) return;
+			if (!getter) {
+				res.status = 200;
+				res.set_content(errorJson("this player has no window to report").dump(),
+					"application/json");
+				return;
+			}
+			dispatch(res, [getter](MediaPlayerController&) -> Json {
+				return Json{{"ok", true}, {"visible", getter()}};
+			});
+		});
+
+		server->Post(path, [guard, dispatch, parseBody, setter](
+			const httplib::Request& req, httplib::Response& res) {
+			if (!guard(req, res)) return;
+			Json body;
+			if (!parseBody(req, res, body)) return;
+			if (!body.contains("visible") || !body["visible"].is_boolean()) {
+				res.status = 400;
+				res.set_content(errorJson("expected {\"visible\": <boolean>}").dump(),
+					"application/json");
+				return;
+			}
+			if (!setter) {
+				res.status = 200;
+				res.set_content(errorJson("this player has no window to change").dump(),
+					"application/json");
+				return;
+			}
+			const bool visible = body["visible"].get<bool>();
+			dispatch(res, [setter, visible](MediaPlayerController&) -> Json {
+				if (!setter(visible)) {
+					return errorJson("the host refused the change");
+				}
+				return Json{{"ok", true}, {"visible", visible}};
+			});
+		});
+
+		LOG_NOTICE("HttpControlServer") << "  GET/POST " << path
+			<< " ({\"visible\": bool} to set)";
+	};
+	presentationRoute("/api/hud", impl_->hooks.getHud, impl_->hooks.setHud);
+	presentationRoute("/api/fullscreen", impl_->hooks.getFullscreen,
+		impl_->hooks.setFullscreen);
+
 	// ---- playlist --------------------------------------------------------
-	server->Post(R"(/api/clips/(\d+))", [guard, dispatch](const httplib::Request& req, httplib::Response& res) {
+	server->Post(R"(/api/clips/(\d+))", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		if (req.matches.size() < 2) {
 			res.status = 400;
@@ -496,16 +506,16 @@ bool HttpControlServer::start(int port) {
 			res.set_content(errorJson("invalid clip index").dump(), "application/json");
 			return;
 		}
-		dispatch(res, [index](MediaPlayerController& c) -> Json {
+		dispatch(res, [this, index](MediaPlayerController& c) -> Json {
 			if (!c.openClipAtIndex(index)) {
 				return errorJson("clip index out of range or failed to load");
 			}
-			return okWithStatus(c);
+			return okWithStatus(c, impl_->hooks);
 		});
 	});
 
 	// Rescan the data directory for new media, then report the new list.
-	server->Post("/api/clips/rescan", [guard, dispatch](const httplib::Request& req, httplib::Response& res) {
+	server->Post("/api/clips/rescan", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		dispatch(res, [](MediaPlayerController& c) -> Json {
 			auto* library = dynamic_cast<MediaClipLibrary*>(&c.clipSource());
@@ -524,7 +534,7 @@ bool HttpControlServer::start(int port) {
 	// only under <data>/scripts and only loaded at startup, because mpv cannot
 	// attach or detach a script once running — so this route reports, it does
 	// not pretend to hot-reload.
-	server->Get("/api/scripts", [guard, dispatch](const httplib::Request& req, httplib::Response& res) {
+	server->Get("/api/scripts", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		dispatch(res, [](MediaPlayerController& c) {
 			Json onDisk = Json::array();
@@ -541,7 +551,7 @@ bool HttpControlServer::start(int port) {
 		});
 	});
 
-	server->Post("/api/scripts/rescan", [guard, dispatch](const httplib::Request& req, httplib::Response& res) {
+	server->Post("/api/scripts/rescan", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		dispatch(res, [](MediaPlayerController& c) -> Json {
 			const std::vector<scripts::ScriptFile> found = c.rescanScripts();
@@ -577,8 +587,7 @@ bool HttpControlServer::start(int port) {
 	LOG_NOTICE("HttpControlServer") << "  GET  /api/status | /api/clips | /api/position | /api/health";
 	LOG_NOTICE("HttpControlServer") << "  POST /api/play | /api/stop | /api/next | /api/previous";
 	LOG_NOTICE("HttpControlServer") << "  POST /api/seek | /api/pause | /api/speed | /api/volume | /api/subtitles";
-	LOG_NOTICE("HttpControlServer") << "  POST /api/clips/{index} | /api/clips/rescan";
-	return true;
+	LOG_NOTICE("HttpControlServer") << "  POST /api/clips/{index} | /api/clips/rescan";	return true;
 }
 
 void HttpControlServer::stop() {

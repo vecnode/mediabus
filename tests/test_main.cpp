@@ -1,10 +1,20 @@
-// media_tests â€” tiny dependency-free assertion runner.
+// media_tests - tiny dependency-free assertion runner.
 //
 // A test framework is not worth a dependency here; this is enough to verify the
-// HTTP contract and the playlist logic, and it keeps the binary linkable
-// without a GL context.
+// HTTP contract, the playlist logic and the Controller's request mapping, and it
+// keeps the binary linkable without a GL context.
+//
+// Nothing here creates a window, needs a Player, or opens a socket: the
+// Controller is exercised through its value types (`PlayerCommands`,
+// `ControllerHttpServer::execute`) and the script host through a recording
+// stand-in for the Player.
 
 #include "app/HttpControlServer.h"
+#include "app/control/ControllerHttpServer.h"
+#include "app/control/ControllerModel.h"
+#include "app/control/LuaControllerScript.h"
+#include "app/control/PlayerClient.h"
+#include "app/dashboard/DashboardModel.h"
 #include "core/Platform.h"
 #include "media/MediaClipLibrary.h"
 #include "media/MediaPlayerController.h"
@@ -78,6 +88,70 @@ struct Registrar {
 	void name(); \
 	const Registrar reg_##name(#name, name); \
 	void name()
+
+// ---------------------------------------------------------------------------
+// A PlayerCommands that records instead of talking HTTP, so a Lua script can be
+// asked what it actually requested.
+// ---------------------------------------------------------------------------
+class RecordingCommands final : public media::PlayerCommands {
+public:
+	std::vector<std::string> calls;
+	std::vector<media::PlayerClipInfo> clips;
+	media::ControllerState snapshot;
+	bool refuseEverything = false;
+	std::string refusal = "refused by the test";
+
+	bool playPause(std::string& error) override { return record("play-pause", error); }
+	bool next(std::string& error) override { return record("next", error); }
+	bool previous(std::string& error) override { return record("previous", error); }
+	bool stop(std::string& error) override { return record("stop", error); }
+	bool openClip(std::size_t index, std::string& error) override {
+		return record("open:" + std::to_string(index), error);
+	}
+	bool seekPercent(double percent, std::string& error) override {
+		return record("seek:" + std::to_string(static_cast<int>(percent)), error);
+	}
+	bool setVolume(double percent, std::string& error) override {
+		return record("volume:" + std::to_string(static_cast<int>(percent)), error);
+	}
+	bool setSpeed(double factor, std::string& error) override {
+		return record("speed:" + std::to_string(static_cast<int>(factor * 100)), error);
+	}
+	bool setHud(bool visible, std::string& error) override {
+		return record(visible ? "hud:on" : "hud:off", error);
+	}
+	bool setFullscreen(bool visible, std::string& error) override {
+		return record(visible ? "fullscreen:on" : "fullscreen:off", error);
+	}
+	bool setSubtitles(bool enabled, std::string& error) override {
+		return record(enabled ? "subtitles:on" : "subtitles:off", error);
+	}
+	std::vector<media::PlayerClipInfo> playlist() const override { return clips; }
+	media::ControllerState state() const override { return snapshot; }
+
+	/// True when `needle` was requested.
+	bool saw(const std::string& needle) const {
+		for (const std::string& call : calls) {
+			if (call == needle) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void clear() { calls.clear(); }
+
+private:
+	bool record(const std::string& call, std::string& error) {
+		calls.push_back(call);
+		if (refuseEverything) {
+			error = refusal;
+			return false;
+		}
+		error.clear();
+		return true;
+	}
+};
 
 // ---------------------------------------------------------------------------
 // A playback backend that records what it was asked to do. Lets the transport
@@ -730,6 +804,777 @@ TEST(add_clip_path_rejects_outside_data_dir) {
 	// about the file's existence and location rather than its name.
 	check(!server.addClipPath(probe, &error),
 		"the probe file is rejected once deleted");
+}
+
+// ---------------------------------------------------------------------------
+// Controller: the command -> route table.
+//
+// This is the guard against the two applications drifting apart: every command
+// the bar can issue must map to a route the Player documents.
+// ---------------------------------------------------------------------------
+TEST(controller_command_routes_match_the_players_api) {
+	const media::ControlCommand commands[] = {
+		media::ControlCommand::Previous,
+		media::ControlCommand::PlayPause,
+		media::ControlCommand::Stop,
+		media::ControlCommand::Next,
+		media::ControlCommand::ToggleHud,
+		media::ControlCommand::ToggleFullscreen,
+		media::ControlCommand::ToggleSubtitles,
+	};
+	// The routes PlayerClient.cpp is allowed to speak. A new command that is
+	// not in this list is a new dependency on the Player, and has to be
+	// deliberate.
+	const char* documented[] = {
+		"/api/play", "/api/stop", "/api/next", "/api/previous", "/api/pause",
+		"/api/seek", "/api/speed", "/api/volume", "/api/subtitles", "/api/hud",
+		"/api/fullscreen", "/api/clips/rescan", "/api/status", "/api/clips",
+		"/api/position", "/api/health", "/api/scripts",
+	};
+
+	for (const media::ControlCommand command : commands) {
+		const media::PlayerRoute route = media::PlayerCommands::routeFor(command, 0.0);
+		check(route.valid, std::string("route exists for ") + media::toString(command));
+		check(route.isPost, std::string("route is a POST for ") + media::toString(command));
+		check(!route.path.empty(), std::string("route has a path for ") + media::toString(command));
+		check(route.body.is_object(),
+			std::string("route carries a JSON object for ") + media::toString(command));
+
+		bool known = false;
+		for (const char* candidate : documented) {
+			if (route.path == candidate) {
+				known = true;
+				break;
+			}
+		}
+		check(known, std::string("documented route for ") + media::toString(command)
+			+ ": " + route.path);
+	}
+
+	// None is not a command: it must never produce a request.
+	check(!media::PlayerCommands::routeFor(media::ControlCommand::None, 0.0).valid,
+		"ControlCommand::None maps to no route");
+}
+
+TEST(controller_forwards_every_command_to_the_player) {
+	RecordingCommands recorder;
+	media::ControllerModel model;
+	media::ControllerHost host;
+	host.player = &recorder;
+	host.model = &model;
+
+	std::string error;
+	const auto send = [&](media::ControlCommand command, double value) {
+		recorder.clear();
+		media::ControllerHttpServer::Request request;
+		request.kind = media::ControllerHttpServer::Request::Kind::Control;
+		request.command = command;
+		request.value = value;
+		const Json reply = media::ControllerHttpServer::execute(host, 8081, true, request);
+		checkEq(reply["ok"].get<bool>(), true,
+			std::string("controller accepted ") + media::toString(command));
+		return recorder.calls;
+	};
+
+	check(send(media::ControlCommand::Next, 0.0).at(0) == "next", "next reaches the player");
+	check(send(media::ControlCommand::Previous, 0.0).at(0) == "previous",
+		"previous reaches the player");
+	check(send(media::ControlCommand::Stop, 0.0).at(0) == "stop", "stop reaches the player");
+	check(send(media::ControlCommand::PlayPause, 0.0).at(0) == "play-pause",
+		"play/pause reaches the player");
+
+	// The toggles resolve against the last snapshot: the wire protocol carries
+	// booleans, so a toggle has to become an absolute value somewhere.
+	model.applyState(media::ControllerState{});
+	recorder.snapshot.hudVisible = true;
+	check(send(media::ControlCommand::ToggleHud, 0.0).at(0) == "hud:off",
+		"hiding a visible HUD sends visible=false");
+	recorder.snapshot.fullscreen = false;
+	check(send(media::ControlCommand::ToggleFullscreen, 0.0).at(0) == "fullscreen:on",
+		"toggling fullscreen from off sends visible=true");
+	recorder.snapshot.subtitlesEnabled = true;
+	check(send(media::ControlCommand::ToggleSubtitles, 0.0).at(0) == "subtitles:off",
+		"toggling subtitles from on sends enabled=false");
+
+	// A refusal must surface as an error object rather than a silent success.
+	recorder.refuseEverything = true;
+	recorder.clear();
+	media::ControllerHttpServer::Request request;
+	request.kind = media::ControllerHttpServer::Request::Kind::Control;
+	request.command = media::ControlCommand::Next;
+	const Json refused = media::ControllerHttpServer::execute(host, 8081, true, request);
+	checkEq(refused["ok"].get<bool>(), false, "a refused command reports not-ok");
+	checkEqStr(refused["error"].get<std::string>(), recorder.refusal,
+		"a refused command carries the player's reason");
+	(void)error;
+}
+
+TEST(controller_script_routes_report_when_scripting_is_unavailable) {
+	RecordingCommands recorder;
+	media::ControllerModel model;
+	media::ControllerHost host;      // scripts == nullptr: Lua failed to start
+	host.player = &recorder;
+	host.model = &model;
+
+	media::ControllerHttpServer::Request request;
+	request.kind = media::ControllerHttpServer::Request::Kind::RunSource;
+	request.text = "controller.Next()";
+
+	const Json reply = media::ControllerHttpServer::execute(host, 8081, true, request);
+	checkEq(reply["ok"].get<bool>(), false, "running a script without Lua reports failure");
+	check(reply["error"].get<std::string>().find("scripting") != std::string::npos,
+		"the failure names scripting as the cause");
+	check(recorder.calls.empty(), "a refused script runs nothing");
+}
+
+TEST(controller_script_names_stay_inside_the_script_directory) {
+	// The route takes a *name*, and this resolver is the whole guard: it is
+	// what keeps "..\..\evil.lua" from being opened, and also what makes a
+	// script that discovery listed actually loadable. Opening the bare name
+	// resolved it against the process working directory instead of the data
+	// directory, so every script the API listed failed to run.
+	check(media::findControllerScript("").empty(), "an empty name resolves to nothing");
+	check(media::findControllerScript("..\\..\\evil.lua").empty(),
+		"a backslash traversal is refused");
+	check(media::findControllerScript("../../evil.lua").empty(),
+		"a forward-slash traversal is refused");
+	check(media::findControllerScript("sub\\evil.lua").empty(),
+		"a name with a directory component is refused");
+	check(media::findControllerScript("C:\\Windows\\evil.lua").empty(),
+		"an absolute path is refused");
+	check(media::findControllerScript("no-such-script.lua").empty(),
+		"an unknown name resolves to nothing");
+
+	// The positive case: the example script the build installs is found by the
+	// name GET /api/controller/scripts reports. Skipped (not failed) in a tree
+	// that has never been built, since the file is a build output.
+	const std::string found = media::findControllerScript("controller-example.lua");
+	if (found.empty()) {
+		check(true, "controller-example.lua is not installed here; positive case skipped");
+	} else {
+		check(std::filesystem::exists(found),
+			"a listed script name resolves to a file that exists");
+	}
+}
+
+TEST(controller_script_route_refuses_a_name_it_cannot_resolve) {
+	RecordingCommands recorder;
+	media::ControllerModel model;
+	media::LuaControllerScript scripts;
+	if (!scripts.initialize()) {
+		check(false, "Lua should be available in a build with the Controller enabled");
+		return;
+	}
+
+	media::ControllerHost host;
+	host.player = &recorder;
+	host.model = &model;
+	host.scripts = &scripts;
+
+	media::ControllerHttpServer::Request request;
+	request.kind = media::ControllerHttpServer::Request::Kind::RunScript;
+	request.text = "..\\..\\media_tests.exe";
+
+	const Json reply = media::ControllerHttpServer::execute(host, 8081, true, request);
+	checkEq(reply["ok"].get<bool>(), false,
+		"running a path outside the script directory reports failure");
+	check(reply["error"].get<std::string>().find("no such script") != std::string::npos,
+		"the failure says the script was not found");
+	check(!scripts.scriptRunning(), "a refused script is not running");
+	check(recorder.calls.empty(), "a refused script issues no player commands");
+}
+
+TEST(controller_script_reloads_from_disk_and_survives_a_broken_edit) {
+	// The Controller's host owns its Lua state, so — unlike the Player's mpv
+	// scripts — a reload is a real reload. That is what the R key and the
+	// reload route rely on, and what the frame loop's change check calls.
+	media::LuaControllerScript scripts;
+	if (!scripts.initialize()) {
+		check(false, "Lua should be available in a build with the Controller enabled");
+		return;
+	}
+	RecordingCommands recorder;
+	scripts.setCommands(&recorder);
+
+	// The production script directory, exactly as the containment test uses the
+	// production data directory: the resolver and the reload path both resolve
+	// against platform::dataDirectory(), so a temp directory would test nothing.
+	const std::string dir = media::platform::dataDirectory() + "\\controller-scripts";
+	std::error_code ec;
+	std::filesystem::create_directories(dir, ec);
+	const std::string path = dir + "\\zz-reload-test.lua";
+
+	const auto write = [&path](const std::string& source) {
+		std::ofstream out(path, std::ios::binary | std::ios::trunc);
+		out << source;
+	};
+
+	write("controller.Log('v1')\n");
+	std::string error;
+	check(scripts.runFile(path, error), "the test script loads");
+	checkEqStr(scripts.lastLog(), "v1", "the first version ran");
+
+	// Nothing touched it, so the change check must be a no-op rather than a
+	// reload: the frame loop calls this every half second.
+	check(!scripts.reloadIfChanged(), "an unmodified script is not reloaded");
+
+	// A save in the same second is caught by the size, because
+	// last_write_time has 1-second granularity here (see fileStamp). This
+	// edit is deliberately longer than the one before it.
+	write("controller.Log('version two')\n");
+	check(scripts.reloadIfChanged(), "a changed script is reloaded in place");
+	checkEqStr(scripts.lastLog(), "version two", "the new version ran");
+
+	// A same-length save in the same second is only visible through the
+	// timestamp, so this leg waits for the clock rather than for the code.
+	// (The body below is exactly as long as the one above, on purpose.)
+	std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+	write("controller.Log('version 3!!')\n");
+	check(scripts.reloadIfChanged(), "a same-length script is caught by the timestamp");
+	checkEqStr(scripts.lastLog(), "version 3!!", "the same-length version ran");
+
+	// A broken edit must be reported and must not leave a half-loaded script
+	// pretending to run.
+	std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+	write("this is not lua\n");
+	check(!scripts.reloadIfChanged(), "a broken edit is not reported as a reload");
+	check(!scripts.lastError().empty(), "a broken edit records why it failed");
+
+	// Remove the probe file but keep the directory: the build installs the
+	// example script there, and a test must not delete a build output.
+	std::filesystem::remove(path, ec);
+}
+
+TEST(controller_command_names_round_trip) {
+	const media::ControlCommand commands[] = {
+		media::ControlCommand::Previous,
+		media::ControlCommand::PlayPause,
+		media::ControlCommand::Stop,
+		media::ControlCommand::Next,
+		media::ControlCommand::ToggleHud,
+		media::ControlCommand::ToggleFullscreen,
+		media::ControlCommand::ToggleSubtitles,
+	};
+	for (const media::ControlCommand command : commands) {
+		// toString is the wire spelling, and commandFromName is its inverse.
+		check(media::ControllerHttpServer::commandFromName(media::toString(command)) == command,
+			std::string("name round-trips for ") + media::toString(command));
+	}
+	check(media::ControllerHttpServer::commandFromName("nonsense") == media::ControlCommand::None,
+		"an unknown command name is rejected");
+	check(media::ControllerHttpServer::commandFromName("pause") == media::ControlCommand::PlayPause,
+		"the 'pause' alias resolves to play/pause");
+}
+
+// ---------------------------------------------------------------------------
+// Controller: layout and hit testing. Pure geometry, no window.
+// ---------------------------------------------------------------------------
+TEST(controller_layout_fits_the_bar_and_buttons_do_not_overlap) {
+	media::ControllerModel model;
+	const float widths[] = {480.0f, 720.0f, 1200.0f, 1920.0f};
+	for (const float width : widths) {
+		model.layout(width, static_cast<float>(media::ControllerModel::kDefaultHeight));
+		const media::ControllerLayout& layout = model.layout();
+
+		check(!layout.buttons.empty(), "there are transport buttons");
+		check(layout.seekBar.w > 0.0f, "the seek bar has width");
+
+		// Every button stays inside the window and clear of the one before it.
+		float previousRight = -1.0f;
+		for (const media::ControlButton& button : layout.buttons) {
+			check(button.rect.x >= 0.0f, "a button starts inside the bar");
+			check(button.rect.x + button.rect.w <= width + 0.5f,
+				"a button ends inside the bar");
+			check(button.rect.y + button.rect.h <= media::ControllerModel::kDefaultHeight + 0.5f,
+				"a button ends above the bottom edge");
+			check(button.rect.x >= previousRight - 0.5f, "buttons do not overlap");
+			previousRight = button.rect.x + button.rect.w;
+		}
+
+		// The seek bar must not sit on top of the buttons, or a click meant for
+		// one would scrub instead.
+		for (const media::ControlButton& button : layout.buttons) {
+			check(!layout.seekBar.hit(button.rect.centreX(), button.rect.centreY()),
+				"the seek bar does not overlap the transport row");
+		}
+	}
+}
+
+TEST(controller_hit_test_returns_the_button_under_the_pointer) {
+	media::ControllerModel model;
+	model.layout(static_cast<float>(media::ControllerModel::kDefaultWidth),
+		static_cast<float>(media::ControllerModel::kDefaultHeight));
+
+	for (const media::ControlButton& button : model.layout().buttons) {
+		const media::ControlCommand hit = model.hitTest(button.rect.centreX(),
+			button.rect.centreY());
+		check(hit == button.command,
+			std::string("centre of '") + button.label + "' hits its own command");
+	}
+
+	// Outside every button, including the padding around the bar.
+	check(model.hitTest(1.0f, 1.0f) == media::ControlCommand::None,
+		"a click in the padding hits nothing");
+	check(model.hitTest(-5.0f, -5.0f) == media::ControlCommand::None,
+		"a click outside the window hits nothing");
+	check(model.hitTest(10000.0f, 10000.0f) == media::ControlCommand::None,
+		"a click past the right edge hits nothing");
+}
+
+TEST(controller_seek_bar_maps_clicks_to_percentages) {
+	media::ControllerModel model;
+	model.layout(static_cast<float>(media::ControllerModel::kDefaultWidth),
+		static_cast<float>(media::ControllerModel::kDefaultHeight));
+	const media::Rect bar = model.layout().seekBar;
+
+	const float midY = bar.centreY();
+	double percent = -1.0;
+	check(model.seekPercentAt(bar.x, midY, percent), "a click at the left edge is on the bar");
+	checkEq(percent, 0.0, "the left edge is 0%");
+
+	check(model.seekPercentAt(bar.x + bar.w * 0.5f, midY, percent), "the middle is on the bar");
+	checkEq(percent, 50.0, "the middle is 50%");
+
+	check(model.seekPercentAt(bar.x + bar.w - 0.5f, midY, percent),
+		"a click at the right edge is on the bar");
+	check(percent > 99.0 && percent <= 100.0, "the right edge is ~100%");
+
+	check(!model.seekPercentAt(bar.x, bar.y - 40.0f, percent),
+		"a click above the bar is not a seek");
+	check(!model.seekPercentAt(-10.0f, midY, percent),
+		"a click left of the bar is not a seek");
+}
+
+TEST(controller_seek_bar_is_inactive_for_a_still_image) {
+	media::ControllerModel model;
+	model.layout(720.0f, static_cast<float>(media::ControllerModel::kDefaultHeight));
+	check(!model.seekBarActive(), "with nothing loaded the seek bar is inactive");
+
+	media::ControllerState video;
+	video.online = true;
+	video.loaded = true;
+	video.seekable = true;
+	video.duration = 120.0;
+	video.clipCount = 2;
+	video.clipName = "clip.mp4";
+	model.applyState(video);
+	check(model.seekBarActive(), "a seekable clip makes the seek bar active");
+
+	media::ControllerState image = video;
+	image.isImage = true;
+	image.seekable = false;
+	image.duration = 0.0;
+	model.applyState(image);
+	check(!model.seekBarActive(), "a held image never offers a seek");
+	check(model.titleText().find("[IMAGE]") != std::string::npos,
+		"the title says the clip is an image");
+
+	media::ControllerState offline = video;
+	offline.online = false;
+	model.applyState(offline);
+	check(!model.seekBarActive(), "an offline player never offers a seek");
+	check(model.titleText().find("NOT RUNNING") != std::string::npos,
+		"the title reports an offline player");
+}
+
+TEST(controller_state_reports_change_only_for_visible_fields) {
+	media::ControllerModel model;
+	media::ControllerState state;
+	state.online = true;
+	state.loaded = true;
+	state.clipName = "a.mp4";
+	state.clipCount = 3;
+
+	check(model.applyState(state), "the first snapshot is a change");
+	check(!model.applyState(state), "an identical snapshot is not a change");
+
+	// A sub-50ms position tick must not be reported as a change: the bar does
+	// not draw that precision, and reporting it would redraw every frame.
+	media::ControllerState ticked = state;
+	ticked.position = state.position + 0.01;
+	check(!model.applyState(ticked), "a sub-frame position tick is not a change");
+
+	media::ControllerState moved = state;
+	moved.position = state.position + 1.0;
+	check(model.applyState(moved), "a whole-second position move is a change");
+
+	media::ControllerState renamed = state;
+	renamed.clipName = "b.mp4";
+	check(model.applyState(renamed), "a clip change is a change");
+
+	model.markOffline("connection refused");
+	check(!model.state().online, "markOffline clears online");
+	checkEqStr(model.state().lastError, "connection refused", "markOffline keeps the reason");
+}
+
+// ---------------------------------------------------------------------------
+// Controller: the script host. Drives a recording player, so no HTTP and no
+// window are involved.
+// ---------------------------------------------------------------------------
+TEST(lua_script_drives_the_player_and_registers_a_tick_handler) {
+	media::LuaControllerScript script;
+	if (!script.initialize()) {
+		check(false, "the Lua host must initialise");
+		return;
+	}
+	RecordingCommands recorder;
+	media::PlayerClipInfo clip;
+	clip.index = 1;
+	clip.name = "b.mp4";
+	clip.mediaType = "video";
+	recorder.clips.push_back(clip);
+	script.setCommands(&recorder);
+
+	std::string error;
+	const bool loaded = script.runSource(
+		"controller.Log('hello') "
+		"controller.Play(1) "
+		"controller.SetVolume(45) "
+		"controller.SetSpeed(2) "
+		"controller.ShowHUD(false) "
+		"local list = controller.Playlist() "
+		"controller.Log('clips=' .. tostring(#list)) "
+		"controller.OnTick(function() controller.Next() end)",
+		"test.lua", error);
+	check(loaded, "the script loads: " + error);
+	check(script.scriptRunning(), "the host reports a running script");
+	check(script.hasTickHandler(), "the OnTick handler was registered");
+	check(script.lastError().empty(), "a clean script leaves no error");
+
+	check(recorder.saw("open:1"), "Play(1) opened clip 1");
+	check(recorder.saw("volume:45"), "SetVolume(45) reached the player");
+	check(recorder.saw("speed:200"), "SetSpeed(2) reached the player");
+	check(recorder.saw("hud:off"), "ShowHUD(false) reached the player");
+
+	// The tick handler runs once per tick and is repeatable.
+	recorder.clear();
+	check(script.tick(), "the first tick succeeds");
+	check(recorder.saw("next"), "the tick handler ran");
+	recorder.clear();
+	check(script.tick(), "the second tick succeeds");
+	check(recorder.saw("next"), "the tick handler is repeatable");
+
+	script.stopScript();
+	check(!script.scriptRunning(), "stopScript clears the running script");
+	check(!script.hasTickHandler(), "stopScript drops the tick handler");
+	recorder.clear();
+	check(script.tick(), "ticking a stopped host is a no-op");
+	check(recorder.calls.empty(), "a stopped script issues nothing");
+}
+
+TEST(lua_script_failure_is_contained_and_the_host_survives) {
+	media::LuaControllerScript script;
+	if (!script.initialize()) {
+		check(false, "the Lua host must initialise");
+		return;
+	}
+	RecordingCommands recorder;
+	script.setCommands(&recorder);
+
+	// A syntax error must not leave a half-loaded script behind.
+	std::string error;
+	check(!script.runSource("this is not lua at all (", "broken.lua", error),
+		"a syntax error fails the load");
+	check(!error.empty(), "the syntax error explains itself");
+	check(!script.scriptRunning(), "a failed load leaves no running script");
+
+	// A runtime error inside OnTick must stop that script, not the host.
+	check(script.runSource("controller.OnTick(function() error('boom') end)",
+		"runtime.lua", error), "a script that raises in OnTick still loads");
+	check(!script.tick(), "the tick reports the failure");
+	check(!script.lastError().empty(), "the failure is recorded");
+	check(!script.scriptRunning(), "the failing script is stopped, not retried forever");
+
+	// The host is still usable afterwards: a bad script must not poison it.
+	check(script.runSource("controller.OnTick(function() controller.Next() end)",
+		"good.lua", error), "a good script loads after a bad one: " + error);
+	recorder.clear();
+	check(script.tick(), "the good script ticks");
+	check(recorder.saw("next"), "the good script still reaches the player");
+}
+
+TEST(lua_script_cannot_freeze_the_bar) {
+	media::LuaControllerScript script;
+	if (!script.initialize()) {
+		check(false, "the Lua host must initialise");
+		return;
+	}
+	RecordingCommands recorder;
+	script.setCommands(&recorder);
+
+	// A loop that never yields must be aborted by the instruction budget, and
+	// must abort quickly enough that this test finishes.
+	std::string error;
+	const auto started = std::chrono::steady_clock::now();
+	const bool loaded = script.runSource("while true do end", "spin.lua", error);
+	const double elapsed = std::chrono::duration<double>(
+		std::chrono::steady_clock::now() - started).count();
+
+	check(!loaded, "an endless loop is aborted");
+	check(!error.empty(), "the abort explains itself");
+	check(elapsed < 10.0, "the abort happens promptly");
+	check(!script.scriptRunning(), "the aborted script is not left running");
+
+	// A long Sleep sequence is capped per tick instead: each call that exceeds
+	// the budget reports false, which is how a script observes the window.
+	check(script.runSource(
+		"controller.OnTick(function() "
+		"  local a = controller.Sleep(50) "
+		"  local b = controller.Sleep(50) "
+		"  controller.Log(tostring(a) .. ',' .. tostring(b)) "
+		"end)", "sleep.lua", error), "the sleep script loads: " + error);
+	check(script.tick(), "the sleep script ticks");
+	checkEqStr(script.lastLog(), "true,false",
+		"Sleep charges a rolling budget: the first call fits, the second does not");
+}
+
+TEST(lua_script_reports_a_refused_player_call) {
+	media::LuaControllerScript script;
+	if (!script.initialize()) {
+		check(false, "the Lua host must initialise");
+		return;
+	}
+	RecordingCommands recorder;
+	recorder.refuseEverything = true;
+	recorder.refusal = "nothing loaded";
+	script.setCommands(&recorder);
+
+	// A refused call raises inside the script, so the operator sees why rather
+	// than a silent no-op.
+	std::string error;
+	const bool loaded = script.runSource("controller.Next()", "refused.lua", error);
+	check(!loaded, "a refused player call fails the script");
+	check(error.find("nothing loaded") != std::string::npos,
+		"the refusal reason survives into the script error: " + error);
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard: rows, availability and hit tests.
+// ---------------------------------------------------------------------------
+TEST(dashboard_rows_report_availability_and_running_state) {
+	media::DashboardModel model;
+	model.layout(static_cast<float>(media::DashboardModel::kDefaultWidth),
+		static_cast<float>(media::DashboardModel::kDefaultHeight));
+	checkEq(model.rows().size(), media::DashboardModel::kRowCount, "there are two rows");
+	checkEq(model.availableCount(), std::size_t{0}, "nothing is available before any probe");
+	checkEqStr(model.rows()[0].title, "Player", "the first row is the Player");
+	checkEqStr(model.rows()[1].title, "Controller", "the second row is the Controller");
+
+	// A missing executable: the row exists, is not launchable, and says why.
+	media::AppStatus absent;
+	model.setStatus(media::DashboardApp::Player, absent, "", media::AppProbe::kPlayerPort);
+	check(!model.rows()[0].available, "a missing executable is reported unavailable");
+	check(model.rows()[0].subtitle.find("not found") != std::string::npos,
+		"the row explains that the executable is missing");
+	checkEq(model.availableCount(), std::size_t{0}, "a missing app is not counted as available");
+
+	// Found but stopped.
+	media::AppStatus stopped;
+	model.setStatus(media::DashboardApp::Player, stopped, "C:\\bin\\media-player-cpp.exe",
+		media::AppProbe::kPlayerPort);
+	check(model.rows()[0].available, "a found executable is available");
+	check(!model.rows()[0].running, "a stopped app is not running");
+	checkEq(model.availableCount(), std::size_t{1}, "the available app is counted");
+
+	// Found and running, started by someone else: running, but not ours to stop.
+	media::AppStatus external;
+	external.apiUp = true;
+	external.childPid = 0;
+	model.setStatus(media::DashboardApp::Player, external, "C:\\bin\\media-player-cpp.exe",
+		media::AppProbe::kPlayerPort);
+	check(model.rows()[0].running, "an app answering its API is running");
+	check(!model.rows()[0].managed, "an app this Dashboard did not start is unmanaged");
+}
+
+TEST(dashboard_hit_test_only_offers_actions_that_make_sense) {
+	media::DashboardModel model;
+	model.layout(static_cast<float>(media::DashboardModel::kDefaultWidth),
+		static_cast<float>(media::DashboardModel::kDefaultHeight));
+
+	// Nothing available: neither button does anything.
+	check(model.hitTest(model.rows()[0].launchButton.centreX(),
+		model.rows()[0].launchButton.centreY()) == media::DashboardAction::None,
+		"an unavailable app cannot be launched");
+
+	media::AppStatus stopped;
+	model.setStatus(media::DashboardApp::Player, stopped, "C:\\bin\\media-player-cpp.exe",
+		media::AppProbe::kPlayerPort);
+	check(model.hitTest(model.rows()[0].launchButton.centreX(),
+		model.rows()[0].launchButton.centreY()) == media::DashboardAction::LaunchPlayer,
+		"a stopped Player row offers LAUNCH");
+	check(model.hitTest(model.rows()[0].stopButton.centreX(),
+		model.rows()[0].stopButton.centreY()) == media::DashboardAction::None,
+		"a stopped row offers no STOP");
+
+	// Running but unmanaged: LAUNCH is inert and STOP must not be offered, or
+	// the Dashboard would kill an app it did not start.
+	media::AppStatus external;
+	external.apiUp = true;
+	model.setStatus(media::DashboardApp::Player, external, "C:\\bin\\media-player-cpp.exe",
+		media::AppProbe::kPlayerPort);
+	check(model.hitTest(model.rows()[0].launchButton.centreX(),
+		model.rows()[0].launchButton.centreY()) == media::DashboardAction::None,
+		"a running app is not launched again");
+	check(model.hitTest(model.rows()[0].stopButton.centreX(),
+		model.rows()[0].stopButton.centreY()) == media::DashboardAction::None,
+		"an unmanaged app is not stopped");
+
+	// Running and managed: STOP is offered.
+	media::AppStatus managed;
+	managed.apiUp = true;
+	managed.childPid = 4242;
+	model.setStatus(media::DashboardApp::Controller, managed,
+		"C:\\bin\\media-controller-cpp.exe", media::AppProbe::kControllerPort);
+	check(model.hitTest(model.rows()[1].stopButton.centreX(),
+		model.rows()[1].stopButton.centreY()) == media::DashboardAction::StopController,
+		"a managed app row offers STOP");
+
+	// Rows do not claim clicks that belong to nothing.
+	check(model.hitTest(1.0f, 1.0f) == media::DashboardAction::None,
+		"a click in the title area acts on nothing");
+}
+
+TEST(dashboard_layout_keeps_rows_inside_the_window) {
+	media::DashboardModel model;
+	model.layout(static_cast<float>(media::DashboardModel::kDefaultWidth),
+		static_cast<float>(media::DashboardModel::kDefaultHeight));
+	for (const media::DashboardRow& row : model.rows()) {
+		check(row.card.x >= 0.0f, "a card starts inside the window");
+		check(row.card.x + row.card.w <= media::DashboardModel::kDefaultWidth + 0.5f,
+			"a card ends inside the window");
+		check(row.card.y >= 0.0f, "a card starts below the top edge");
+		check(row.card.y + row.card.h <= media::DashboardModel::kDefaultHeight + 0.5f,
+			"a card ends above the bottom edge");
+		// Buttons sit inside their card and in the order STOP then LAUNCH.
+		check(row.stopButton.x >= row.card.x, "STOP starts inside its card");
+		check(row.launchButton.x + row.launchButton.w <= row.card.x + row.card.w + 0.5f,
+			"LAUNCH ends inside its card");
+		check(row.stopButton.x + row.stopButton.w <= row.launchButton.x + 0.5f,
+			"STOP does not overlap LAUNCH");
+	}
+	check(model.messageArea().y + model.messageArea().h
+			<= media::DashboardModel::kDefaultHeight + 0.5f,
+		"the message line sits inside the window");
+}
+
+TEST(controller_client_commands_reach_the_player_over_http) {
+	// End-to-end over a real socket: a stand-in Player server on a private port,
+	// a real PlayerClient, and the base send() dispatch in between.
+	//
+	// This test exists because that dispatch path is easy to get subtly wrong:
+	// `PlayerCommands::send` works by calling the virtual command methods, so a
+	// client whose `next()` calls back into `send()` recurses until the stack is
+	// gone -- a silent, instant death rather than a diagnosable failure.
+	//
+	// Every call goes through withServer(), which is what pumps the server's
+	// command queue: the queue only runs on the thread that calls poll(), so a
+	// synchronous call from this thread would wait for a poll() that this thread
+	// is itself blocking on.
+	const int port = 18099;
+	media::MediaClipLibrary library;
+	ScopedDataDir data(true);
+	scanInto(library, data);
+	RecordingBackend backend;
+	media::MediaPlayerController player(library, &backend);
+	check(player.setup(), "the stand-in player has a clip to open");
+	// A stand-in needs window state too: /api/hud and /api/fullscreen answer
+	// "this player has no window to change" when the host supplies no hooks,
+	// which is correct but would make the toggle commands untestable here.
+	bool standInHud = true;
+	bool standInFullscreen = false;
+	media::PresentationHooks hooks;
+	hooks.getHud = [&standInHud] { return standInHud; };
+	hooks.setHud = [&standInHud](bool visible) { standInHud = visible; return true; };
+	hooks.getFullscreen = [&standInFullscreen] { return standInFullscreen; };
+	hooks.setFullscreen = [&standInFullscreen](bool visible) {
+		standInFullscreen = visible;
+		return true;
+	};
+	media::HttpControlServer server(player, hooks);
+	if (!server.start(port)) {
+		check(false, "the stand-in player server must bind");
+		return;
+	}
+
+	media::PlayerClient client("127.0.0.1", port);
+	// Small poll interval: this test drives its own client, never start().
+	std::string error;
+
+	// A plain GET must work before anything else, so a failure below is about
+	// the command path and not about reaching the server at all.
+	{
+		std::string pingError;
+		const bool reachable = withServer(server, [&] { return client.ping(pingError); });
+		check(reachable, "the stand-in player answers a plain GET: " + pingError);
+	}
+
+	// Every enum command goes through send(), which is the recursion hazard.
+	const media::ControlCommand commands[] = {
+		media::ControlCommand::Next,
+		media::ControlCommand::Previous,
+		media::ControlCommand::PlayPause,
+		media::ControlCommand::Stop,
+		media::ControlCommand::ToggleHud,
+		media::ControlCommand::ToggleFullscreen,
+		media::ControlCommand::ToggleSubtitles,
+	};
+	for (const media::ControlCommand command : commands) {
+		error.clear();
+		const bool ok = withServer(server, [&] {
+			return client.send(command, 0.0, error);
+		});
+		check(ok, std::string("send(") + media::toString(command)
+			+ ") reached the player: " + error);
+	}
+
+	// The explicit command methods must reach the player too, not just dispatch.
+	{
+		error.clear();
+		check(withServer(server, [&] { return client.openClip(1, error); }),
+			"openClip reaches the player: " + error);
+		error.clear();
+		check(withServer(server, [&] { return client.seekPercent(25.0, error); }),
+			"seekPercent reaches the player: " + error);
+		error.clear();
+		check(withServer(server, [&] { return client.setVolume(40.0, error); }),
+			"setVolume reaches the player: " + error);
+		error.clear();
+		check(withServer(server, [&] { return client.setSpeed(1.5, error); }),
+			"setSpeed reaches the player: " + error);
+	}
+
+	// A command reply is adopted, so the client's snapshot tracks the Player.
+	check(client.state().online, "a command reply marks the player online");
+	checkEq(client.state().clipIndex, std::size_t{1}, "the client adopted the new clip index");
+	checkEq(client.state().volume, 40.0, "the client adopted the new volume");
+
+	// An unknown command must fail without touching the network.
+	error.clear();
+	check(!client.send(media::ControlCommand::None, 0.0, error), "an unknown command fails");
+	check(!error.empty(), "the failure explains itself");
+
+	server.stop();
+}
+
+TEST(controller_state_survives_a_refused_player_reply) {
+	// A Player that answers ok:false must produce an error, not a crash and not
+	// a silent success.
+	RecordingCommands recorder;
+	recorder.refuseEverything = true;
+	recorder.refusal = "clip index out of range";
+	media::ControllerModel model;
+	media::ControllerHost host;
+	host.player = &recorder;
+	host.model = &model;
+
+	media::ControllerHttpServer::Request request;
+	request.kind = media::ControllerHttpServer::Request::Kind::OpenClip;
+	request.clipIndex = 999;
+
+	const Json reply = media::ControllerHttpServer::execute(host, 8081, true, request);
+	checkEq(reply["ok"].get<bool>(), false, "a refused open is not reported as success");
+	checkEqStr(reply["error"].get<std::string>(), "clip index out of range",
+		"the player's reason is passed through");
 }
 
 // ---------------------------------------------------------------------------

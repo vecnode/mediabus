@@ -1,0 +1,15 @@
+/*
+ * app-controller.rc - Windows executable resources for the Controller.
+ *
+ * Same icon as the Player: the three applications belong to one product, and a
+ * distinct icon would only make the taskbar harder to read. The Controller is a
+ * normal window with a taskbar button, so the icon matters here as much as it
+ * does for the player.
+ *
+ * The path is relative to this file and uses a forward slash so windres
+ * resolves it identically no matter which directory the build runs from.
+ */
+
+#include <windows.h>
+
+IDI_APPICON ICON "../../assets/icon/icon.ico"

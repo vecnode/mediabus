@@ -14,6 +14,15 @@ struct Rect {
 	float h = 0.0f;
 
 	bool empty() const { return w <= 0.0f || h <= 0.0f; }
+
+	/// True when (px, py) is inside the rectangle. Half-open, matching how a
+	/// hit test wants to treat shared edges.
+	bool hit(float px, float py) const {
+		return px >= x && px < x + w && py >= y && py < y + h;
+	}
+
+	float centreX() const { return x + w * 0.5f; }
+	float centreY() const { return y + h * 0.5f; }
 };
 
 /// A GPU texture the scene can draw.
