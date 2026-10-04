@@ -117,7 +117,7 @@ try {
     }
 
     # --- Player ----------------------------------------------------------
-    Start-App 'media-player-cpp.exe'
+    Start-App 'vn-mediabus-player.exe'
     Start-Sleep -Seconds 5
 
     $health = Get-Json "http://127.0.0.1:$PlayerPort/api/health"
@@ -161,7 +161,7 @@ try {
     }
 
     # --- Controller ------------------------------------------------------
-    Start-App 'media-controller-cpp.exe'
+    Start-App 'vn-mediabus-controller.exe'
     Start-Sleep -Seconds 5
 
     $cstatus = Get-Json "http://127.0.0.1:$ControllerPort/api/controller/status"
@@ -242,19 +242,19 @@ try {
     # The Dashboard's whole job is noticing the other two and starting them. It
     # is started last, with both already up, so what it has to report is exactly
     # the state this run produced.
-    Start-App 'media-dashboard-cpp.exe'
+    Start-App 'vn-mediabus-dashboard.exe'
     Start-Sleep -Seconds 4
-    $dash = Get-Process -Name 'media-dashboard-cpp' -ErrorAction SilentlyContinue
+    $dash = Get-Process -Name 'vn-mediabus-dashboard' -ErrorAction SilentlyContinue
     Check 'dashboard running' ($null -ne $dash) ''
 
     # The Dashboard decides liveness by probing these two endpoints, so they
     # answering is what it sees; its own log confirms it drew a window.
     $alive = @()
-    foreach ($name in 'media-player-cpp', 'media-controller-cpp') {
+    foreach ($name in 'vn-mediabus-player', 'vn-mediabus-controller') {
         if (Get-Process -Name $name -ErrorAction SilentlyContinue) { $alive += $name }
     }
     Check 'dashboard has both apps' ($alive.Count -eq 2) ($alive -join ', ')
-    $dashLog = Get-Content (Join-Path $RunDir 'media-dashboard-cpp.err') -ErrorAction SilentlyContinue
+    $dashLog = Get-Content (Join-Path $RunDir 'vn-mediabus-dashboard.err') -ErrorAction SilentlyContinue
     if ($dashLog) {
         $dashLog | Where-Object { $_ -match 'render backend|player API|controller API' } |
             ForEach-Object { Say "dashboard | $_" }
@@ -265,7 +265,7 @@ try {
     # failed, that text is the first thing a reader needs.
     if ($failures.Count -gt 0) {
         Say "FAILURES: $($failures -join ', ')"
-        foreach ($stem in 'media-player-cpp', 'media-controller-cpp', 'media-dashboard-cpp') {
+        foreach ($stem in 'vn-mediabus-player', 'vn-mediabus-controller', 'vn-mediabus-dashboard') {
             $err = Get-Content (Join-Path $RunDir "$stem.err") -ErrorAction SilentlyContinue
             if ($err) {
                 Say "--- $stem stderr (tail) ---"

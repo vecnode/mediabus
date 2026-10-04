@@ -1,0 +1,27 @@
+/*
+ * player.rc - Windows executable resources for the Player.
+ *
+ * The application icon was committed long ago but never actually attached to
+ * the binary, so it showed the default Windows icon in the taskbar and title
+ * bar. This wires it up.
+ *
+ * MEDIABUS_ICON is the absolute path to the icon, passed in by the build (see
+ * the RC defines in CMakeLists.txt). It is deliberately NOT a relative path:
+ * windres resolves a relative file name against the build directory rather
+ * than against this file, so "../../assets/icon/icon.ico" stopped resolving the
+ * moment these resource files moved out of src/app/ - and the failure is a
+ * build error, not a silently wrong icon.
+ */
+
+#include <windows.h>
+
+/* The product icon. windres takes the undefined identifier as a resource
+ * *name*, so this is loaded as LoadIconW(module, L"IDI_APPICON") rather than by
+ * an ordinal - see TrayIcon.cpp, which puts it in the notification area. */
+IDI_APPICON ICON MEDIABUS_ICON
+
+/* GLFW looks for a resource named GLFW_ICON when it registers its window class,
+ * and falls back to the generic Windows logo when there is none. Without this
+ * line the title bar, the taskbar button and Alt-Tab all show that logo even
+ * though the executable itself carries the real icon. Same image, second name. */
+GLFW_ICON ICON MEDIABUS_ICON

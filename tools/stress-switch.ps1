@@ -17,7 +17,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $Repo = Split-Path -Parent $PSScriptRoot
 $Bin = Join-Path $Repo 'bin'
-$Exe = Join-Path $Bin 'media-player-cpp.exe'
+$Exe = Join-Path $Bin 'vn-mediabus-player.exe'
 $Base = 'http://127.0.0.1:8080'
 
 $env:PATH = "$Bin;$env:PATH"

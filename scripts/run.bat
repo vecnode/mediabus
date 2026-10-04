@@ -24,7 +24,7 @@ setlocal
 call "%~dp0_bin-dir.bat"
 if errorlevel 1 exit /b 1
 
-set "EXE=%BIN%\media-dashboard-cpp.exe"
+set "EXE=%BIN%\vn-mediabus-dashboard.exe"
 set "LOG=%BIN%\dashboard.log"
 
 if not exist "%EXE%" (
@@ -57,7 +57,7 @@ rem Confirm it actually came up. A launcher missing a runtime DLL dies before
 rem main() and prints nothing at all, which would otherwise look like nothing
 rem happened; this is also how a double-click reports success or failure.
 timeout /t 2 /nobreak >nul 2>&1
-tasklist /fi "imagename eq media-dashboard-cpp.exe" 2>nul | find /i "media-dashboard-cpp.exe" >nul
+tasklist /fi "imagename eq vn-mediabus-dashboard.exe" 2>nul | find /i "vn-mediabus-dashboard.exe" >nul
 if errorlevel 1 (
     echo.
     echo The launcher did not start.
@@ -68,7 +68,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo mediaplayer-app launcher is running.
+echo vn-mediabus launcher is running.
 echo   right-click its tray icon to launch the Player or the Controller, or to quit.
 echo   no tray icon? The launcher window is shown instead - see bin\dashboard.log.
 exit /b 0

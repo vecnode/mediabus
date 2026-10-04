@@ -1,4 +1,4 @@
-// media_tests - tiny dependency-free assertion runner.
+// vn-mediabus-tests - tiny dependency-free assertion runner.
 //
 // A test framework is not worth a dependency here; this is enough to verify the
 // HTTP contract, the playlist logic and the Controller's request mapping, and it
@@ -9,12 +9,12 @@
 // `ControllerHttpServer::execute`) and the script host through a recording
 // stand-in for the Player.
 
-#include "app/HttpControlServer.h"
-#include "app/control/ControllerHttpServer.h"
-#include "app/control/ControllerModel.h"
-#include "app/control/LuaControllerScript.h"
-#include "app/control/PlayerClient.h"
-#include "app/dashboard/DashboardModel.h"
+#include "net/HttpControlServer.h"
+#include "control/ControllerHttpServer.h"
+#include "control/ControllerModel.h"
+#include "control/LuaControllerScript.h"
+#include "control/PlayerClient.h"
+#include "control/DashboardModel.h"
 #include "core/AppConfig.h"
 #include "core/Platform.h"
 #include "core/UiScale.h"
@@ -976,7 +976,7 @@ TEST(controller_script_route_refuses_a_name_it_cannot_resolve) {
 
 	media::ControllerHttpServer::Request request;
 	request.kind = media::ControllerHttpServer::Request::Kind::RunScript;
-	request.text = "..\\..\\media_tests.exe";
+	request.text = "..\\..\\vn-mediabus-tests.exe";
 
 	const Json reply = media::ControllerHttpServer::execute(host, 8081, true, request);
 	checkEq(reply["ok"].get<bool>(), false,
@@ -1373,7 +1373,7 @@ TEST(dashboard_rows_report_availability_and_running_state) {
 
 	// Found but stopped.
 	media::AppStatus stopped;
-	model.setStatus(media::DashboardApp::Player, stopped, "C:\\bin\\media-player-cpp.exe",
+	model.setStatus(media::DashboardApp::Player, stopped, "C:\\bin\\vn-mediabus-player.exe",
 		media::AppProbe::kPlayerPort);
 	check(model.rows()[0].available, "a found executable is available");
 	check(!model.rows()[0].running, "a stopped app is not running");
@@ -1383,7 +1383,7 @@ TEST(dashboard_rows_report_availability_and_running_state) {
 	media::AppStatus external;
 	external.apiUp = true;
 	external.childPid = 0;
-	model.setStatus(media::DashboardApp::Player, external, "C:\\bin\\media-player-cpp.exe",
+	model.setStatus(media::DashboardApp::Player, external, "C:\\bin\\vn-mediabus-player.exe",
 		media::AppProbe::kPlayerPort);
 	check(model.rows()[0].running, "an app answering its API is running");
 	check(!model.rows()[0].managed, "an app this Dashboard did not start is unmanaged");
@@ -1400,7 +1400,7 @@ TEST(dashboard_hit_test_only_offers_actions_that_make_sense) {
 		"an unavailable app cannot be launched");
 
 	media::AppStatus stopped;
-	model.setStatus(media::DashboardApp::Player, stopped, "C:\\bin\\media-player-cpp.exe",
+	model.setStatus(media::DashboardApp::Player, stopped, "C:\\bin\\vn-mediabus-player.exe",
 		media::AppProbe::kPlayerPort);
 	check(model.hitTest(model.rows()[0].launchButton.centreX(),
 		model.rows()[0].launchButton.centreY()) == media::DashboardAction::LaunchPlayer,
@@ -1413,7 +1413,7 @@ TEST(dashboard_hit_test_only_offers_actions_that_make_sense) {
 	// the Dashboard would kill an app it did not start.
 	media::AppStatus external;
 	external.apiUp = true;
-	model.setStatus(media::DashboardApp::Player, external, "C:\\bin\\media-player-cpp.exe",
+	model.setStatus(media::DashboardApp::Player, external, "C:\\bin\\vn-mediabus-player.exe",
 		media::AppProbe::kPlayerPort);
 	check(model.hitTest(model.rows()[0].launchButton.centreX(),
 		model.rows()[0].launchButton.centreY()) == media::DashboardAction::None,
@@ -1427,7 +1427,7 @@ TEST(dashboard_hit_test_only_offers_actions_that_make_sense) {
 	managed.apiUp = true;
 	managed.childPid = 4242;
 	model.setStatus(media::DashboardApp::Controller, managed,
-		"C:\\bin\\media-controller-cpp.exe", media::AppProbe::kControllerPort);
+		"C:\\bin\\vn-mediabus-controller.exe", media::AppProbe::kControllerPort);
 	check(model.hitTest(model.rows()[1].stopButton.centreX(),
 		model.rows()[1].stopButton.centreY()) == media::DashboardAction::StopController,
 		"a managed app row offers STOP");
@@ -1847,11 +1847,11 @@ TEST(player_media_folder_route_switches_the_corpus) {
 	media::MediaClipLibrary library;
 	media::MediaPlayerController player(library, nullptr);
 	// Seed the playlist directly: this test is about the route, not about the
-	// startup path that reads mediaplayer.ini.
+	// startup path that reads mediabus.ini.
 	scanInto(library, data);
 	check(player.rescan() > 0, "the fixture folder seeded the playlist");
 
-	// IMPORTANT: the route persists the folder to mediaplayer.ini, and that file
+	// IMPORTANT: the route persists the folder to mediabus.ini, and that file
 	// is shared state next to the binary. Point the config at a throwaway path
 	// for the duration of this test, or the player left in bin/ would come up
 	// scanning this test's temporary directory.
@@ -1999,7 +1999,7 @@ TEST(controller_client_posts_the_media_folder_to_the_players_route) {
 }
 
 // ---------------------------------------------------------------------------
-int main() {	std::printf("media_tests\n");
+int main() {	std::printf("vn-mediabus-tests\n");
 	for (const TestCase& test : registry()) {
 		gCurrentTest = test.name;
 		const int before = gFailures;

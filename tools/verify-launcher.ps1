@@ -23,7 +23,7 @@ $ErrorActionPreference = 'Stop'
 # This script lives in tools/, so the repository root is its parent.
 $Repo = Split-Path $PSScriptRoot -Parent
 $Bin = Join-Path $Repo 'bin'
-$Exe = Join-Path $Bin 'media-dashboard-cpp.exe'
+$Exe = Join-Path $Bin 'vn-mediabus-dashboard.exe'
 $Log = Join-Path $Bin 'verify-launcher.err'
 
 Add-Type @"
@@ -67,7 +67,7 @@ function Check([string]$what, [bool]$ok, [string]$detail) {
     if (-not $ok) { $script:failures += $what }
 }
 
-Get-Process -Name 'media-dashboard-cpp' -ErrorAction SilentlyContinue |
+Get-Process -Name 'vn-mediabus-dashboard' -ErrorAction SilentlyContinue |
     Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 500
 Remove-Item $Log -ErrorAction SilentlyContinue
@@ -120,7 +120,7 @@ $second = Start-Process -FilePath $Exe -ArgumentList '--tray' -WorkingDirectory 
     -PassThru -NoNewWindow -RedirectStandardError (Join-Path $Bin 'verify-launcher2.err')
 $second.WaitForExit(10000) | Out-Null
 Start-Sleep -Seconds 1
-$count = @(Get-Process -Name 'media-dashboard-cpp' -ErrorAction SilentlyContinue).Count
+$count = @(Get-Process -Name 'vn-mediabus-dashboard' -ErrorAction SilentlyContinue).Count
 Check 'second launch does not add a copy' ($count -eq 1) "instances=$count"
 
 # --- closing the window, in whichever mode we are in ---------------------

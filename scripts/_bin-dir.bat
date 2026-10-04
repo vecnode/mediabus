@@ -18,9 +18,9 @@ rem The applications are built side by side into <repo>\bin. These wrappers live
 rem in <repo>\scripts, so the repo root is one level up. The second candidate
 rem covers a packaged layout where the wrappers sit next to the executables.
 set "BIN=%SCRIPT_DIR%..\bin"
-if not exist "%BIN%\media-player-cpp.exe" (
-    if not exist "%BIN%\media-controller-cpp.exe" (
-        if not exist "%BIN%\media-dashboard-cpp.exe" (
+if not exist "%BIN%\vn-mediabus-player.exe" (
+    if not exist "%BIN%\vn-mediabus-controller.exe" (
+        if not exist "%BIN%\vn-mediabus-dashboard.exe" (
             set "BIN=%SCRIPT_DIR%"
         )
     )

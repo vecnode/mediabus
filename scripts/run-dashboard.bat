@@ -1,6 +1,6 @@
 @echo off
 rem ---------------------------------------------------------------------------
-rem run-dashboard.bat - start ONLY the launcher window (media-dashboard-cpp.exe).
+rem run-dashboard.bat - start ONLY the launcher window (vn-mediabus-dashboard.exe).
 rem
 rem run.bat is the same launcher started hidden in the tray, which is the normal
 rem way to use it. This wrapper is for looking at it: the window opens on screen
@@ -16,7 +16,7 @@ rem ---------------------------------------------------------------------------
 setlocal
 call "%~dp0_bin-dir.bat"
 
-set "EXE=%BIN%\media-dashboard-cpp.exe"
+set "EXE=%BIN%\vn-mediabus-dashboard.exe"
 set "LOG=%BIN%\dashboard.log"
 
 if not exist "%EXE%" (
@@ -34,7 +34,7 @@ rem --tray: the window is meant to be seen here.
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%EXE%' -ArgumentList '%*' -WorkingDirectory '%BIN%' -RedirectStandardError '%LOG%'"
 
 timeout /t 2 /nobreak >nul 2>&1
-tasklist /fi "imagename eq media-dashboard-cpp.exe" 2>nul | find /i "media-dashboard-cpp.exe" >nul
+tasklist /fi "imagename eq vn-mediabus-dashboard.exe" 2>nul | find /i "vn-mediabus-dashboard.exe" >nul
 if errorlevel 1 (
     echo.
     echo The launcher did not start. Read "%LOG%" - it says why.
@@ -43,6 +43,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo media-dashboard-cpp is running, window shown.
+echo vn-mediabus-dashboard is running, window shown.
 echo   log: %LOG%
 exit /b 0

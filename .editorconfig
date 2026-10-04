@@ -1,0 +1,44 @@
+# vn-mediabus editor configuration.
+#
+# The C++ style is tabs for indentation, which is what the whole tree uses and
+# what the surrounding-code rule in AGENTS.md asks for. Pinning it here means an
+# editor cannot quietly reformat a file to spaces.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{c,cc,cpp,h,hpp,inc}]
+indent_style = tab
+indent_size = 4
+tab_width = 4
+
+[*.{ps1,bat,cmd}]
+indent_style = space
+indent_size = 4
+
+[*.{md,yml,yaml,json,txt,ini}]
+indent_style = space
+indent_size = 2
+
+[*.lua]
+indent_style = tab
+indent_size = 4
+
+[CMakeLists.txt]
+indent_style = space
+indent_size = 4
+
+[*.cmake]
+indent_style = space
+indent_size = 4
+
+# Vendored code is not ours to format.
+[vendor/**]
+indent_style = unset
+indent_size = unset
+trim_trailing_whitespace = false

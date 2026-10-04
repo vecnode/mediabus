@@ -28,7 +28,7 @@ $ErrorActionPreference = 'Stop'
 
 $Repo = Split-Path -Parent $PSScriptRoot
 $Bin = Join-Path $Repo 'bin'
-$Exe = Join-Path $Bin 'media-player-cpp.exe'
+$Exe = Join-Path $Bin 'vn-mediabus-player.exe'
 $Base = 'http://127.0.0.1:8080'
 
 if (-not (Test-Path $Exe)) { throw "not built: $Exe (run build.ps1)" }
@@ -208,7 +208,7 @@ if ($samples.Count -lt 3) {
 }
 
 $lines = New-Object System.Collections.Generic.List[string]
-$lines.Add("media-player-cpp soak report")
+$lines.Add("vn-mediabus-player soak report")
 $lines.Add("============================")
 $lines.Add("started            : $($started.ToString('yyyy-MM-dd HH:mm:ss'))")
 $lines.Add("ran for            : ${durationSec}s ($([math]::Round($durationSec/60,1)) min)")

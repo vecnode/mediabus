@@ -9,10 +9,10 @@ rem next to the four run*.bat wrappers, and so a double-click in Explorer works.
 rem
 rem It builds all three applications plus the test binary:
 rem
-rem   bin\media-player-cpp.exe      the player
-rem   bin\media-controller-cpp.exe  the control bar
-rem   bin\media-dashboard-cpp.exe   the launcher  <- what run.bat starts
-rem   bin\media_tests.exe           the headless suite
+rem   bin\vn-mediabus-player.exe      the player
+rem   bin\vn-mediabus-controller.exe  the control bar
+rem   bin\vn-mediabus-dashboard.exe   the launcher  <- what run.bat starts
+rem   bin\vn-mediabus-tests.exe           the headless suite
 rem
 rem Arguments are passed straight through, so build.bat -Clean, -Run and
 rem -App Controller work exactly as they do on build.ps1.

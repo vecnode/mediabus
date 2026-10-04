@@ -1,0 +1,17 @@
+/*
+ * app-dashboard.rc - Windows executable resources for the Dashboard.
+ *
+ * Same icon as the other two applications for the same reason: one product,
+ * one icon, three windows.
+ *
+ * The path is relative to this file and uses a forward slash so windres
+ * resolves it identically no matter which directory the build runs from.
+ */
+
+#include <windows.h>
+
+IDI_APPICON ICON MEDIABUS_ICON
+
+/* GLFW reads this name for its window class; without it the window shows the
+ * generic Windows logo instead of the product icon. See app.rc. */
+GLFW_ICON ICON MEDIABUS_ICON

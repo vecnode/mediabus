@@ -40,12 +40,14 @@ $BuildDir = Join-Path $Repo 'build'
 
 # The three applications this tree produces. They must all exist after a build:
 # the Dashboard locates the other two beside itself, so a partial build would
-# leave it with buttons that cannot work.
+# leave it with buttons that cannot work. The test binary is checked separately
+# below, and is the one that proves the rest is sound.
 $Exes = [ordered]@{
-    Player     = 'bin\media-player-cpp.exe'
-    Controller = 'bin\media-controller-cpp.exe'
-    Dashboard  = 'bin\media-dashboard-cpp.exe'
+    Player     = 'bin\vn-mediabus-player.exe'
+    Controller = 'bin\vn-mediabus-controller.exe'
+    Dashboard  = 'bin\vn-mediabus-dashboard.exe'
 }
+$TestExe = 'bin\vn-mediabus-tests.exe'
 
 # MSYS2 mingw64 has no cmake package on this machine, so use the native
 # Windows CMake and tell it which toolchain to drive. Ninja is in MSYS2.
@@ -63,8 +65,14 @@ if ($Clean -and (Test-Path $BuildDir)) {
 
 # libmpv must exist before configuring: the build fails fast with a clear
 # message if it is missing, but a nicer place to say so is here.
-if (-not (Test-Path (Join-Path $Repo 'lib\libmpv.dll.a'))) {
+if (-not (Test-Path (Join-Path $Repo 'vendor\libmpv\lib\libmpv.dll.a'))) {
     throw "Vendored libmpv missing. Run:  pwsh -File tools/build-libmpv.ps1"
+}
+
+# Dear ImGui is vendored under vendor/imgui and is tracked, so a clone builds
+# with no network access. This is only the hint for how to reproduce it.
+if (-not (Test-Path (Join-Path $Repo 'vendor\imgui\imgui.cpp'))) {
+    throw "Vendored Dear ImGui missing. Run:  pwsh -File tools/fetch-imgui.ps1"
 }
 
 Write-Host ">>> configuring with $Cmake"
@@ -90,6 +98,11 @@ foreach ($name in $Exes.Keys) {
     }
     $built += $path
 }
+$testPath = Join-Path $Repo $TestExe
+if (-not (Test-Path $testPath)) {
+    throw "test binary not found: $testPath"
+}
+$built += $testPath
 Write-Host ""
 foreach ($path in $built) { Write-Host "built: $path" }
 

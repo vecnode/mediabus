@@ -1,0 +1,57 @@
+# vn-mediabus line-ending and language policy.
+#
+# The repository is developed on Windows with a MinGW toolchain, and two of its
+# file types are line-ending sensitive:
+#
+#   * scripts/*.bat are run by cmd.exe, which handles LF poorly inside a
+#     `for` block or a parenthesised group. Keep them CRLF.
+#   * Lua files must be pure ASCII with no byte-order mark, and consistent LF.
+#     Lua 5.1 treats a BOM as a syntax error, so nothing here may add one.
+#
+# Everything else is normalised to LF in the repository, which is what the
+# compiler, CMake and git's diff all prefer.
+
+* text=auto eol=lf
+
+# Windows shell scripts.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# PowerShell is happy either way; keep it LF like the rest of the source.
+*.ps1 text eol=lf
+
+# Source.
+*.c    text eol=lf
+*.cc   text eol=lf
+*.cpp  text eol=lf
+*.h    text eol=lf
+*.hpp  text eol=lf
+*.inc  text eol=lf
+
+# Scripting. No BOM, ever: tools/check-lua.ps1 enforces the ASCII half of this.
+*.lua text eol=lf
+
+# Build and documentation.
+CMakeLists.txt text eol=lf
+*.cmake        text eol=lf
+*.md           text eol=lf
+*.txt          text eol=lf
+*.ini          text eol=lf
+*.yml          text eol=lf
+
+# Vendored code counts against nothing: it is not ours to review, and git's
+# language statistics should describe this project rather than Dear ImGui.
+vendor/** linguist-vendored
+experiments/fixtures/** linguist-documentation
+
+# Binary.
+*.ico  binary
+*.dll  binary
+*.exe  binary
+*.a    binary
+*.mkv  binary
+*.mp4  binary
+*.webm binary
+*.avi  binary
+*.png  binary
+*.jpg  binary

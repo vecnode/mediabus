@@ -1,0 +1,19 @@
+/*
+ * app-controller.rc - Windows executable resources for the Controller.
+ *
+ * Same icon as the Player: the three applications belong to one product, and a
+ * distinct icon would only make the taskbar harder to read. The Controller is a
+ * normal window with a taskbar button, so the icon matters here as much as it
+ * does for the player.
+ *
+ * The path is relative to this file and uses a forward slash so windres
+ * resolves it identically no matter which directory the build runs from.
+ */
+
+#include <windows.h>
+
+IDI_APPICON ICON MEDIABUS_ICON
+
+/* GLFW reads this name for its window class; without it the window shows the
+ * generic Windows logo instead of the product icon. See app.rc. */
+GLFW_ICON ICON MEDIABUS_ICON

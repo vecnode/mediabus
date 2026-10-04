@@ -33,9 +33,9 @@ $BinDir = Join-Path $Repo 'bin'
 # each answer on their own port; the Dashboard has no API, so staying alive with
 # a GL context is the whole check.
 $Apps = [ordered]@{
-    'media-player-cpp.exe'     = 'http://127.0.0.1:8080/api/health'
-    'media-controller-cpp.exe' = 'http://127.0.0.1:8081/api/controller/status'
-    'media-dashboard-cpp.exe'  = ''
+    'vn-mediabus-player.exe'     = 'http://127.0.0.1:8080/api/health'
+    'vn-mediabus-controller.exe' = 'http://127.0.0.1:8081/api/controller/status'
+    'vn-mediabus-dashboard.exe'  = ''
 }
 
 foreach ($name in $Apps.Keys) {
@@ -46,7 +46,7 @@ foreach ($name in $Apps.Keys) {
 }
 
 if ([string]::IsNullOrWhiteSpace($OutDir)) {
-    $OutDir = Join-Path $Repo 'dist\mediaplayer-app'
+    $OutDir = Join-Path $Repo 'dist\vn-mediabus'
 }
 
 if (Test-Path $OutDir) {

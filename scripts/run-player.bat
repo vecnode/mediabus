@@ -1,6 +1,6 @@
 @echo off
 rem ---------------------------------------------------------------------------
-rem run-player.bat - start ONLY the Player (media-player-cpp.exe).
+rem run-player.bat - start ONLY the Player (vn-mediabus-player.exe).
 rem
 rem Use this when the launcher is already running, or when you want the Player
 rem on its own. Normally you start run.bat instead and launch the Player from
@@ -16,7 +16,7 @@ rem ---------------------------------------------------------------------------
 setlocal
 call "%~dp0_bin-dir.bat"
 
-set "EXE=%BIN%\media-player-cpp.exe"
+set "EXE=%BIN%\vn-mediabus-player.exe"
 set "LOG=%BIN%\player.log"
 
 if not exist "%EXE%" (
@@ -35,7 +35,7 @@ rem this shell and block until the Player exits.
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%EXE%' -ArgumentList '%*' -WorkingDirectory '%BIN%' -RedirectStandardOutput '%LOG%' -RedirectStandardError '%LOG.err'"
 
 timeout /t 2 /nobreak >nul 2>&1
-tasklist /fi "imagename eq media-player-cpp.exe" 2>nul | find /i "media-player-cpp.exe" >nul
+tasklist /fi "imagename eq vn-mediabus-player.exe" 2>nul | find /i "vn-mediabus-player.exe" >nul
 if errorlevel 1 (
     echo.
     echo The Player did not start. Read "%LOG%" and "%LOG%.err" - they say why.
@@ -44,6 +44,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo media-player-cpp is running. Control API: http://127.0.0.1:8080
+echo vn-mediabus-player is running. Control API: http://127.0.0.1:8080
 echo   log: %LOG%
 exit /b 0

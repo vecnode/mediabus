@@ -1,0 +1,25 @@
+Dear ImGui v1.92.9b
+Source: https://github.com/ocornut/imgui
+Commit: f1cc2ae15e53a861a874c3034aae6798fde194ab
+Fetched by: tools/fetch-imgui.ps1
+
+Vendored deliberately, exactly like vendor/httplib.h and vendor/json.hpp, so a
+clone builds with no network access. The version is pinned: ImGui's API does
+change between releases and an unpinned copy would make the build unrepeatable.
+
+Only the five core sources and the GLFW + OpenGL3 backends are taken, including
+the backend's bundled gl3w-derived loader (imgui_impl_opengl3_loader.h), which
+Dear ImGui 1.92 always uses.
+
+On GL loaders: the backend's loader is a private, file-local set of function
+pointers and defines, used only inside imgui_impl_opengl3.cpp - it does not
+collide with GLEW, which is what every other GL consumer in this tree uses
+(RenderDevice, MPVSurface). One loader is therefore still the rule for our own
+code; the backend simply carries its own, as upstream intends.
+
+Older ImGui releases honoured IMGUI_IMPL_OPENGL_LOADER_CUSTOM, which made it
+tempting to compile the backend directly against GLEW. Dear ImGui 1.92 dropped
+that hook: the macro is still tested but nothing includes a custom header any
+more, so defining it makes every GL type undefined. Do not reintroduce it.
+
+To refresh:   pwsh -File tools/fetch-imgui.ps1 -Version vX.Y.Z -Force

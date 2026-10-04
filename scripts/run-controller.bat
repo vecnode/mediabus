@@ -1,7 +1,7 @@
 @echo off
 rem ---------------------------------------------------------------------------
 rem run-controller.bat - start ONLY the Controller bar
-rem (media-controller-cpp.exe).
+rem (vn-mediabus-controller.exe).
 rem
 rem Normally you start run.bat and launch the Controller from the tray menu.
 rem This wrapper is for running the bar by itself, which is what you want when
@@ -17,7 +17,7 @@ rem ---------------------------------------------------------------------------
 setlocal
 call "%~dp0_bin-dir.bat"
 
-set "EXE=%BIN%\media-controller-cpp.exe"
+set "EXE=%BIN%\vn-mediabus-controller.exe"
 set "LOG=%BIN%\controller.log"
 
 if not exist "%EXE%" (
@@ -32,7 +32,7 @@ if not exist "%EXE%" (
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%EXE%' -ArgumentList '%*' -WorkingDirectory '%BIN%' -RedirectStandardOutput '%LOG%' -RedirectStandardError '%LOG.err'"
 
 timeout /t 2 /nobreak >nul 2>&1
-tasklist /fi "imagename eq media-controller-cpp.exe" 2>nul | find /i "media-controller-cpp.exe" >nul
+tasklist /fi "imagename eq vn-mediabus-controller.exe" 2>nul | find /i "vn-mediabus-controller.exe" >nul
 if errorlevel 1 (
     echo.
     echo The Controller did not start. Read "%LOG%" and "%LOG%.err" - they say why.
@@ -41,6 +41,6 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo media-controller-cpp is running. API: http://127.0.0.1:8081
+echo vn-mediabus-controller is running. API: http://127.0.0.1:8081
 echo   log: %LOG%
 exit /b 0
