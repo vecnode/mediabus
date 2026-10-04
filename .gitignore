@@ -79,3 +79,7 @@ dist/
 
 # Generated: installed from scripts/media-player.lua by the build
 bin/data/scripts/media-player.lua
+
+# Scratch media directory created by tests/test_main.cpp (removed on teardown;
+# ignored as a safety net so a crashed test binary cannot dirty the tree)
+bin/tests-tmp-*/

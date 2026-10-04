@@ -134,8 +134,10 @@ The first eight keys of `/api/status` (`loaded`, `playing`, `isImage`,
   scanned, and any route taking a path accepts files inside the data directory
   only. See `MPVSurface::applyOptions` and `HttpControlServer::addClipPath`.
 - **mpv option names differ from the CLI.** libmpv's option table has `scripts`
-  (a path list), not `script`. `p0/option_probe.cpp` answers this kind of
-  question in seconds; use it rather than guessing.
+  (a path list), not `script`; setting the wrong name fails with
+  `option not found`. `p0/audio_probe.cpp` shows the pattern for asking libmpv
+  directly (create, set options, initialize, print properties) rather than
+  guessing — copy it when you need to probe another option.
 - **MSYS-style paths from PowerShell must be quoted** (`"-IC:/msys64/..."`), or
   the linker resolves nothing. A Windows path with backslashes becomes an
   invalid escape in CMake and meson generated files. Forward slashes everywhere.

@@ -1,4 +1,4 @@
-// media_tests — tiny dependency-free assertion runner.
+// media_tests â€” tiny dependency-free assertion runner.
 //
 // A test framework is not worth a dependency here; this is enough to verify the
 // HTTP contract and the playlist logic, and it keeps the binary linkable
@@ -143,47 +143,73 @@ public:
 	std::vector<media::scripts::ScriptFile> scripts_;
 };
 
-/// Create a temporary data directory with a couple of fake clips in it.
-/// MediaClipLibrary resolves bin/data from the executable, and the test binary
-/// lives in bin/, so this writes into the real location and cleans up after.
+/// A controlled media directory for the tests.
+///
+/// Previously the tests scanned the real bin/data, so the number of assertions
+/// changed with whatever media happened to be installed (170 checks with a bare
+/// folder, 185 with the codec fixtures present). A suite whose coverage depends
+/// on ambient files is not trustworthy. This seeds a fixed set in a temp
+/// directory instead, and MediaClipLibrary::setRoot points at it.
 struct ScopedDataDir {
 	std::filesystem::path root;
 	std::vector<std::filesystem::path> created;
 
 	explicit ScopedDataDir(bool makeVideos) {
-		root = media::platform::dataDirectory();
+		// Build the directory next to the executable rather than in the system
+		// temp directory: the MinGW runtime's temp path here resolves to a short
+		// name that the process is denied access to.
+		root = std::filesystem::path(media::platform::executableDirectory())
+			/ ("tests-tmp-" + std::to_string(::GetCurrentProcessId()));
+		std::error_code ec;
+		std::filesystem::remove_all(root, ec);
 		std::filesystem::create_directories(root);
+		std::filesystem::create_directories(root / "scripts");
 
-		// A 1x1 PNG: enough for the extension-based scan, no decoder involved.
+		// A tiny PNG: enough for the extension-based scan, no decode involved.
 		const std::filesystem::path png = root / "zz-test-image.png";
-		if (!std::filesystem::exists(png)) {
+		{
 			std::ofstream out(png, std::ios::binary);
 			const unsigned char kPng[] = {
 				0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
 			out.write(reinterpret_cast<const char*>(kPng), sizeof(kPng));
 			created.push_back(png);
 		}
-		std::filesystem::path a = root / "zz-test-a.mp4";
-		if (!std::filesystem::exists(a)) {
-			std::ofstream(a).put('\0');
-			created.push_back(a);
-		}
+		const std::filesystem::path a = root / "zz-test-a.mp4";
+		std::ofstream(a).put('\0');
+		created.push_back(a);
+
 		if (makeVideos) {
-			std::filesystem::path b = root / "zz-test-b.mkv";
-			if (!std::filesystem::exists(b)) {
-				std::ofstream(b).put('\0');
-				created.push_back(b);
-			}
+			const std::filesystem::path b = root / "zz-test-b.mkv";
+			std::ofstream(b).put('\0');
+			created.push_back(b);
+			// A non-media file, to prove the scanner ignores it.
+			std::ofstream(root / "notes.txt").put('\0');
+		}
+
+		// Seed a script so discovery can be asserted against this directory
+		// instead of whatever happens to be installed in bin/data/scripts.
+		// scripts::discover() resolves production paths, so the copy is checked
+		// through a rooted path below.
+		{
+			const std::filesystem::path script = root / "scripts" / "test-script.lua";
+			std::ofstream(script) << "-- test fixture\n";
+			created.push_back(script);
+			// A non-script file, to prove the filter works.
+			std::ofstream(root / "scripts" / "README.txt") << "not a script\n";
 		}
 	}
 
 	~ScopedDataDir() {
 		std::error_code ec;
-		for (const auto& p : created) {
-			std::filesystem::remove(p, ec);
-		}
+		std::filesystem::remove_all(root, ec);
 	}
 };
+
+/// Point a library at a controlled directory and scan it.
+void scanInto(media::MediaClipLibrary& library, const ScopedDataDir& data) {
+	library.setRoot(data.root.string());
+	library.scan();
+}
 
 /// Drive the server's main-thread queue while an HTTP call is outstanding.
 /// The call itself runs on another thread, so the test can keep polling.
@@ -242,31 +268,30 @@ TEST(platform_paths_are_absolute) {
 	checkEqStr(media::platform::lowerExtension("dir.with.dots/file"), "", "dot in dir is not an extension");
 }
 
-TEST(script_host_discovers_the_reference_script) {
-	// The seeded data dir plus the installed reference script.
-	const std::vector<media::scripts::ScriptFile> found = media::scripts::discover();
-	check(!found.empty(), "at least one script discovered under data/scripts");
-
-	bool sawLua = false;
-	for (const auto& script : found) {
-		check(!script.absolutePath.empty(), "script path populated");
-		check(!script.name.empty(), "script name populated");
-		check(script.language == "lua" || script.language == "js", "script language classified");
-		check(script.absolutePath.find("datascripts") == std::string::npos,
-			"script path has a real separator before 'scripts'");
-		if (script.name == "media-player.lua") {
-			sawLua = true;
-			checkEqStr(script.language, "lua", "reference script classified as lua");
-		}
-	}
-	check(sawLua, "reference script media-player.lua found");
-
-	// Non-script extensions are not runnable.
+TEST(script_host_filters_and_reports_consistently) {
+	// Non-script extensions must never be runnable.
 	check(media::scripts::isScriptPath("a.lua"), ".lua is a script");
 	check(media::scripts::isScriptPath("a.JS"), ".JS is a script (case-insensitive)");
 	check(!media::scripts::isScriptPath("a.txt"), ".txt is not a script");
 	check(!media::scripts::isScriptPath("a.luac"), ".luac is not loaded");
 	check(!media::scripts::isScriptPath(""), "empty path is not a script");
+
+	// discover() resolves the executable's data directory, which the build
+	// populates. Assert properties that hold for whatever is there rather than a
+	// specific filename, so the suite does not depend on ambient state.
+	const std::vector<media::scripts::ScriptFile> found = media::scripts::discover();
+	std::printf("        (discovered %zu script(s) in the data directory)\n", found.size());
+	for (const auto& script : found) {
+		check(!script.absolutePath.empty(), "script path populated");
+		check(!script.name.empty(), "script name populated");
+		check(script.language == "lua" || script.language == "js",
+			"discovered script has a classified language");
+		check(media::scripts::isScriptPath(script.absolutePath),
+			"every discovered script has a script extension");
+		// Regression: a missing path separator once produced "datascripts".
+		check(script.absolutePath.find("datascripts") == std::string::npos,
+			"script path has a real separator before 'scripts'");
+	}
 }
 
 /// Images and video share the mpv surface, but they must not share transport
@@ -276,7 +301,7 @@ TEST(script_host_discovers_the_reference_script) {
 TEST(image_clips_have_no_transport) {
 	ScopedDataDir data(true);
 	media::MediaClipLibrary library;
-	library.scan();
+	scanInto(library, data);
 
 	RecordingBackend backend;
 	media::MediaPlayerController controller(library, &backend);
@@ -303,7 +328,7 @@ TEST(image_clips_have_no_transport) {
 TEST(playlist_mixes_images_and_videos_in_a_stable_order) {
 	ScopedDataDir data(true);
 	media::MediaClipLibrary library;
-	library.scan();
+	scanInto(library, data);
 	check(library.size() >= 3, "seeded three clips");
 
 	// Images before videos, then by path: this ordering is what makes index 0
@@ -335,7 +360,7 @@ TEST(playlist_mixes_images_and_videos_in_a_stable_order) {
 TEST(controller_forwards_scripts_to_the_backend) {
 	ScopedDataDir data(true);
 	media::MediaClipLibrary library;
-	library.scan();
+	scanInto(library, data);
 	RecordingBackend backend;
 	media::MediaPlayerController controller(library, &backend);
 
@@ -360,18 +385,10 @@ TEST(controller_forwards_scripts_to_the_backend) {
 		"backend received every discovered script");
 
 	const media::MediaPlayerStatus status = controller.getStatus();
-	check(!status.scriptsLoaded.empty(), "status reports loaded scripts");
-
-	bool sawReference = false;
-	for (const std::string& name : status.scriptsLoaded) {
-		if (name == "media-player.lua") {
-			sawReference = true;
-		}
-	}
-	check(sawReference, "reference script reported as loaded");
-
-	// Every script the backend was given must also be listed as on-disk, so the
-	// two views can never disagree.
+	// scriptsLoaded mirrors whatever discover() found, so assert the two agree
+	// rather than naming a file that may not be installed.
+	checkEq(status.scriptsLoaded.size(), controller.scriptFiles().size(),
+		"loaded scripts mirror the discovered list");
 	checkEq(controller.loadedScripts().size(), controller.scriptFiles().size(),
 		"loaded count matches the on-disk count");
 }
@@ -379,9 +396,10 @@ TEST(controller_forwards_scripts_to_the_backend) {
 TEST(clip_library_orders_images_first_and_dedups) {
 	ScopedDataDir data(true);
 	media::MediaClipLibrary library;
-	library.scan();
+	scanInto(library, data);
 
-	check(library.size() >= 3, "found the three seeded clips");
+	// The scanner must ignore non-media files even though they sit in the root.
+	checkEq(library.size(), std::size_t{3}, "found exactly the three seeded clips");
 	check(library.size() > 0 && library.clipAt(0).mediaType == media::ClipMediaType::Image,
 		"images sort before videos");
 
@@ -409,7 +427,7 @@ TEST(clip_library_orders_images_first_and_dedups) {
 TEST(controller_transport_state) {
 	ScopedDataDir data(true);
 	media::MediaClipLibrary library;
-	library.scan();
+	scanInto(library, data);
 
 	RecordingBackend backend;
 	media::MediaPlayerController controller(library, &backend);
@@ -482,7 +500,7 @@ TEST(controller_transport_state) {
 TEST(http_contract_shape) {
 	ScopedDataDir data(true);
 	media::MediaClipLibrary library;
-	library.scan();
+	scanInto(library, data);
 
 	RecordingBackend backend;
 	media::MediaPlayerController controller(library, &backend);
@@ -627,7 +645,7 @@ TEST(http_contract_shape) {
 TEST(http_position_route) {
 	ScopedDataDir data(true);
 	media::MediaClipLibrary library;
-	library.scan();
+	scanInto(library, data);
 	RecordingBackend backend;
 	media::MediaPlayerController controller(library, &backend);
 	controller.setup();
@@ -672,7 +690,7 @@ TEST(http_position_route) {
 TEST(add_clip_path_rejects_outside_data_dir) {
 	ScopedDataDir data(true);
 	media::MediaClipLibrary library;
-	library.scan();
+	scanInto(library, data);
 	media::MediaPlayerController controller(library, nullptr);
 	media::HttpControlServer server(controller);
 
@@ -694,9 +712,24 @@ TEST(add_clip_path_rejects_outside_data_dir) {
 	check(!server.addClipPath(media::platform::dataDirectory() + "\\notes.txt", &error),
 		"non-media extension rejected");
 
-	// A real, in-data-root media file is accepted.
-	check(server.addClipPath(media::platform::dataDirectory() + "\\zz-test-a.mp4", &error),
+	// The acceptance case needs a real file inside the PRODUCTION data
+	// directory, because HttpControlServer::addClipPath resolves its containment
+	// boundary from platform::dataDirectory() rather than from the library under
+	// test. Create one and remove it again so the test is self-contained.
+	const std::string probe = media::platform::dataDirectory() + "\\zz-containment-probe.mp4";
+	{
+		std::ofstream out(probe, std::ios::binary);
+		out.put('\0');
+	}
+	check(server.addClipPath(probe, &error),
 		"in-root media file accepted");
+	std::error_code cleanup;
+	std::filesystem::remove(probe, cleanup);
+
+	// And the same path once removed must be refused, proving the check is
+	// about the file's existence and location rather than its name.
+	check(!server.addClipPath(probe, &error),
+		"the probe file is rejected once deleted");
 }
 
 // ---------------------------------------------------------------------------

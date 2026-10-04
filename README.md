@@ -48,7 +48,8 @@ FBO, with `image-display-duration=inf` holding a still on screen. An image
 therefore has no timeline — `seekable` is false, `playing` is false and
 `duration` is 0, whatever transport a host sends.
 
-Reproduce with `p0/audio_probe.exe <file>` for the audio path and
+Reproduce with the standalone audio probe (`p0/build.ps1 <file>`, which reports
+`current-ao` and `audio-pts` without needing a window) and
 `bin/media_tests.exe` for the control plane.
 
 ## What it does

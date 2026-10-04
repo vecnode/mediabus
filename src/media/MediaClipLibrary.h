@@ -19,6 +19,16 @@ public:
 	/// Rescan the data directory. Safe to call repeatedly.
 	void scan();
 
+	/// Override the directory that scan() walks.
+	///
+	/// Defaults to `<exeDir>/data`, which is what the running player uses. Tests
+	/// point it at a controlled temporary directory instead of the live media
+	/// folder: otherwise the number of assertions depends on whatever clips
+	/// happen to be installed, and a suite that silently checks less is worse
+	/// than one that fails.
+	void setRoot(std::string root) { rootOverride_ = std::move(root); }
+	const std::string& root() const;
+
 	bool empty() const override { return clips_.empty(); }
 	std::size_t size() const override { return clips_.size(); }
 
@@ -42,6 +52,8 @@ public:
 private:
 	std::vector<MediaClip> clips_;
 	std::string searchLog_;
+	/// Empty means "use the executable's data directory".
+	std::string rootOverride_;
 };
 
 } // namespace media

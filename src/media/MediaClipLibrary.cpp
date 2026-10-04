@@ -125,14 +125,24 @@ bool MediaClipLibrary::indexForName(const std::string& name, std::size_t& outInd
 	return false;
 }
 
+const std::string& MediaClipLibrary::root() const {
+	if (!rootOverride_.empty()) {
+		return rootOverride_;
+	}
+	static const std::string kDefault = platform::dataDirectory();
+	return kDefault;
+}
+
 void MediaClipLibrary::scan() {
 	clips_.clear();
 	searchLog_.clear();
 
 	std::error_code ec;
-	const fs::path root = platform::dataDirectory();
-	if (!fs::exists(root, ec) || !fs::is_directory(root, ec)) {
-		searchLog_ = "no data folder at " + preferredString(root);
+	// Named scanRoot, not root: a local called `root` would shadow the root()
+	// accessor and make the call above fail to compile.
+	const fs::path scanRoot = root();
+	if (!fs::exists(scanRoot, ec) || !fs::is_directory(scanRoot, ec)) {
+		searchLog_ = "no data folder at " + preferredString(scanRoot);
 		LOG_ERROR("MediaClipLibrary") << searchLog_;
 		return;
 	}
@@ -141,9 +151,9 @@ void MediaClipLibrary::scan() {
 	seen.reserve(1024);
 	std::size_t found = 0;
 
-	for (fs::recursive_directory_iterator it(root, ec), end; it != end; it.increment(ec)) {
+	for (fs::recursive_directory_iterator it(scanRoot, ec), end; it != end; it.increment(ec)) {
 		if (ec) {
-			LOG_ERROR("MediaClipLibrary") << "scan failed for " << preferredString(root)
+			LOG_ERROR("MediaClipLibrary") << "scan failed for " << preferredString(scanRoot)
 				<< ": " << ec.message();
 			break;
 		}
@@ -181,7 +191,7 @@ void MediaClipLibrary::scan() {
 			return a.absolutePath < b.absolutePath;
 		});
 
-	searchLog_ = preferredString(root) + " (" + std::to_string(found) + ")";
+	searchLog_ = preferredString(scanRoot) + " (" + std::to_string(found) + ")";
 	const std::size_t images = imageCount();
 	LOG_NOTICE("MediaClipLibrary") << "Searched " << searchLog_;
 	LOG_NOTICE("MediaClipLibrary") << "Total: " << clips_.size() << " media file(s) ("

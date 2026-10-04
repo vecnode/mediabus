@@ -30,5 +30,7 @@ in `AGENTS.md` — read it first.
 - **Security defaults stay off:** `ytdl`, `load-scripts`, `config`,
   `input-conf`, `access-references`, `autoload-files`.
 - **Verify with evidence.** `bin/media_tests.exe` covers the API and library
-  logic without a GL context; `p0/audio_probe.exe` proves the audio path; prefer
-  screenshots over assertions for anything visual.
+  logic without a GL context; `p0/build.ps1` builds and runs the standalone audio
+  probe (it reports `current-ao` / `audio-pts`, which is how the audio path is
+  proven); `tools/soak.ps1` measures memory and thread growth over a long run.
+  Prefer screenshots over assertions for anything visual.
