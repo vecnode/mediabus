@@ -14,6 +14,7 @@
 #include "control/ControllerModel.h"
 #include "control/LuaControllerScript.h"
 #include "control/PlayerClient.h"
+#include "control/TransportAction.h"
 #include "control/DashboardModel.h"
 #include "core/AppConfig.h"
 #include "core/Platform.h"
@@ -128,6 +129,13 @@ public:
 	}
 	bool setSubtitles(bool enabled, std::string& error) override {
 		return record(enabled ? "subtitles:on" : "subtitles:off", error);
+	}
+	/// The media-folder route, mirrored from PlayerClient so the recorder can
+	/// prove the choice went to the Player rather than straight to the config
+	/// file. Overriding the virtual is what makes TransportExecutor's call land
+	/// here through a `PlayerCommands&`.
+	bool setMediaFolder(const std::string& directory, std::string& error) override {
+		return record("folder:" + directory, error);
 	}
 	std::vector<media::PlayerClipInfo> playlist() const override { return clips; }
 	media::ControllerState state() const override { return snapshot; }
@@ -1070,87 +1078,58 @@ TEST(controller_command_names_round_trip) {
 }
 
 // ---------------------------------------------------------------------------
-// Controller: layout and hit testing. Pure geometry, no window.
+// Controller: the model's derived text and seek position.
+//
+// The geometry tests that used to live here are GONE, and deliberately: the
+// Controller's interface is Dear ImGui now, which lays out its own widgets, so
+// there are no rectangles left in this library to overlap or to hit-test. What
+// is worth testing moved with it - the executor below is where a click turns
+// into a Player request, so that is what these tests drive.
 // ---------------------------------------------------------------------------
-TEST(controller_layout_fits_the_bar_and_buttons_do_not_overlap) {
+TEST(controller_seek_percent_follows_the_position_and_is_clamped) {
 	media::ControllerModel model;
-	const float widths[] = {480.0f, 720.0f, 1200.0f, 1920.0f};
-	for (const float width : widths) {
-		model.layout(width, static_cast<float>(media::ControllerModel::kDefaultHeight));
-		const media::ControllerLayout& layout = model.layout();
 
-		check(!layout.buttons.empty(), "there are transport buttons");
-		check(layout.seekBar.w > 0.0f, "the seek bar has width");
+	// Nothing loaded: no timeline, so no position to report.
+	checkEq(model.seekPercent(), 0.0, "an empty state seeks to 0%");
 
-		// Every button stays inside the window and clear of the one before it.
-		float previousRight = -1.0f;
-		for (const media::ControlButton& button : layout.buttons) {
-			check(button.rect.x >= 0.0f, "a button starts inside the bar");
-			check(button.rect.x + button.rect.w <= width + 0.5f,
-				"a button ends inside the bar");
-			check(button.rect.y + button.rect.h <= media::ControllerModel::kDefaultHeight + 0.5f,
-				"a button ends above the bottom edge");
-			check(button.rect.x >= previousRight - 0.5f, "buttons do not overlap");
-			previousRight = button.rect.x + button.rect.w;
-		}
+	media::ControllerState state;
+	state.online = true;
+	state.loaded = true;
+	state.seekable = true;
+	state.duration = 120.0;
 
-		// The seek bar must not sit on top of the buttons, or a click meant for
-		// one would scrub instead.
-		for (const media::ControlButton& button : layout.buttons) {
-			check(!layout.seekBar.hit(button.rect.centreX(), button.rect.centreY()),
-				"the seek bar does not overlap the transport row");
-		}
-	}
-}
+	state.position = 0.0;
+	model.applyState(state);
+	checkEq(model.seekPercent(), 0.0, "the start of a clip is 0%");
 
-TEST(controller_hit_test_returns_the_button_under_the_pointer) {
-	media::ControllerModel model;
-	model.layout(static_cast<float>(media::ControllerModel::kDefaultWidth),
-		static_cast<float>(media::ControllerModel::kDefaultHeight));
+	state.position = 60.0;
+	model.applyState(state);
+	checkEq(model.seekPercent(), 50.0, "half way through is 50%");
 
-	for (const media::ControlButton& button : model.layout().buttons) {
-		const media::ControlCommand hit = model.hitTest(button.rect.centreX(),
-			button.rect.centreY());
-		check(hit == button.command,
-			std::string("centre of '") + button.label + "' hits its own command");
-	}
+	state.position = 120.0;
+	model.applyState(state);
+	checkEq(model.seekPercent(), 100.0, "the end of a clip is 100%");
 
-	// Outside every button, including the padding around the bar.
-	check(model.hitTest(1.0f, 1.0f) == media::ControlCommand::None,
-		"a click in the padding hits nothing");
-	check(model.hitTest(-5.0f, -5.0f) == media::ControlCommand::None,
-		"a click outside the window hits nothing");
-	check(model.hitTest(10000.0f, 10000.0f) == media::ControlCommand::None,
-		"a click past the right edge hits nothing");
-}
+	// A position past the end - which mpv can report for a moment around a loop
+	// or a seek to the very end - must clamp rather than push the widget past
+	// its own range.
+	state.position = 300.0;
+	model.applyState(state);
+	checkEq(model.seekPercent(), 100.0, "a position past the end clamps to 100%");
 
-TEST(controller_seek_bar_maps_clicks_to_percentages) {
-	media::ControllerModel model;
-	model.layout(static_cast<float>(media::ControllerModel::kDefaultWidth),
-		static_cast<float>(media::ControllerModel::kDefaultHeight));
-	const media::Rect bar = model.layout().seekBar;
+	state.position = -5.0;
+	model.applyState(state);
+	checkEq(model.seekPercent(), 0.0, "a negative position clamps to 0%");
 
-	const float midY = bar.centreY();
-	double percent = -1.0;
-	check(model.seekPercentAt(bar.x, midY, percent), "a click at the left edge is on the bar");
-	checkEq(percent, 0.0, "the left edge is 0%");
-
-	check(model.seekPercentAt(bar.x + bar.w * 0.5f, midY, percent), "the middle is on the bar");
-	checkEq(percent, 50.0, "the middle is 50%");
-
-	check(model.seekPercentAt(bar.x + bar.w - 0.5f, midY, percent),
-		"a click at the right edge is on the bar");
-	check(percent > 99.0 && percent <= 100.0, "the right edge is ~100%");
-
-	check(!model.seekPercentAt(bar.x, bar.y - 40.0f, percent),
-		"a click above the bar is not a seek");
-	check(!model.seekPercentAt(-10.0f, midY, percent),
-		"a click left of the bar is not a seek");
+	// A still image has duration 0, which must not divide by zero.
+	state.duration = 0.0;
+	state.position = 10.0;
+	model.applyState(state);
+	checkEq(model.seekPercent(), 0.0, "a zero duration reports 0% rather than dividing by it");
 }
 
 TEST(controller_seek_bar_is_inactive_for_a_still_image) {
 	media::ControllerModel model;
-	model.layout(720.0f, static_cast<float>(media::ControllerModel::kDefaultHeight));
 	check(!model.seekBarActive(), "with nothing loaded the seek bar is inactive");
 
 	media::ControllerState video;
@@ -1169,15 +1148,206 @@ TEST(controller_seek_bar_is_inactive_for_a_still_image) {
 	image.duration = 0.0;
 	model.applyState(image);
 	check(!model.seekBarActive(), "a held image never offers a seek");
-	check(model.titleText().find("[IMAGE]") != std::string::npos,
+	check(model.titleText().find("[image]") != std::string::npos,
 		"the title says the clip is an image");
 
 	media::ControllerState offline = video;
 	offline.online = false;
 	model.applyState(offline);
 	check(!model.seekBarActive(), "an offline player never offers a seek");
-	check(model.titleText().find("NOT RUNNING") != std::string::npos,
+	check(model.titleText().find("not running") != std::string::npos,
 		"the title reports an offline player");
+}
+
+// ---------------------------------------------------------------------------
+// Controller: the action the interface produces, and what it does to the Player.
+//
+// This is the replacement for hit testing. A panel click becomes a
+// TransportAction; TransportExecutor is the only thing that turns one into a
+// Player request, and it is a value-level object, so the whole contract is
+// verifiable with no window, no socket and no ImGui.
+// ---------------------------------------------------------------------------
+TEST(transport_action_reaches_the_player_for_every_transport_command) {
+	RecordingCommands recorder;
+	media::ControllerModel model;
+	media::TransportExecutor executor(recorder, model, nullptr);
+
+	// The executor maps a command onto PlayerCommands::send, which resolves the
+	// toggles against the latest snapshot. That mapping is covered by
+	// player_command_routes_match_the_documented_api below; here the point is
+	// that the executor forwards at all, and reports nothing on success.
+	recorder.snapshot.online = true;
+	recorder.snapshot.loaded = true;
+	model.applyState(recorder.snapshot);
+
+	struct Case { media::ControlCommand command; const char* expected; };
+	const Case cases[] = {
+		{media::ControlCommand::Next, "next"},
+		{media::ControlCommand::Previous, "previous"},
+		{media::ControlCommand::Stop, "stop"},
+		{media::ControlCommand::PlayPause, "play-pause"},
+	};
+	for (const Case& c : cases) {
+		recorder.clear();
+		media::TransportAction action;
+		action.valid = true;
+		action.command = c.command;
+		const std::string message = executor.perform(action);
+		checkEqStr(message, "", "a command that worked reports nothing");
+		check(recorder.saw(c.expected),
+			std::string("the action reached the player as '") + c.expected + "'");
+	}
+
+	// Toggles resolve to an absolute value from the snapshot, because the wire
+	// protocol carries booleans rather than toggles.
+	recorder.clear();
+	recorder.snapshot.hudVisible = true;
+	model.applyState(recorder.snapshot);
+	media::TransportAction toggle;
+	toggle.valid = true;
+	toggle.command = media::ControlCommand::ToggleHud;
+	executor.perform(toggle);
+	check(recorder.saw("hud:off"), "toggling a visible HUD asks for it to be hidden");
+
+	recorder.clear();
+	recorder.snapshot.hudVisible = false;
+	model.applyState(recorder.snapshot);
+	executor.perform(toggle);
+	check(recorder.saw("hud:on"), "toggling a hidden HUD asks for it to be shown");
+}
+
+TEST(transport_action_carries_seek_volume_speed_and_clip) {
+	RecordingCommands recorder;
+	media::ControllerModel model;
+	media::TransportExecutor executor(recorder, model, nullptr);
+
+	media::TransportAction seek;
+	seek.valid = true;
+	seek.seeking = true;
+	seek.seekPercent = 42.0;
+	executor.perform(seek);
+	check(recorder.saw("seek:42"), "a seek action seeks to its own percentage");
+
+	// A seek to 0% is why the action carries a flag as well as a value: without
+	// `seeking`, "nothing happened" and "seek to the start" are the same value.
+	recorder.clear();
+	media::TransportAction seekZero;
+	seekZero.valid = true;
+	seekZero.seeking = true;
+	seekZero.seekPercent = 0.0;
+	executor.perform(seekZero);
+	check(recorder.saw("seek:0"), "a seek to 0% is still a seek");
+
+	recorder.clear();
+	media::TransportAction volume;
+	volume.valid = true;
+	volume.settingVolume = true;
+	volume.volume = 65.0;
+	executor.perform(volume);
+	check(recorder.saw("volume:65"), "a volume action sets the volume");
+
+	recorder.clear();
+	media::TransportAction speed;
+	speed.valid = true;
+	speed.settingSpeed = true;
+	speed.speed = 1.5;
+	executor.perform(speed);
+	check(recorder.saw("speed:150"), "a speed action sets the speed");
+
+	recorder.clear();
+	media::TransportAction open;
+	open.valid = true;
+	open.openingClip = true;
+	open.clipIndex = 3;
+	executor.perform(open);
+	check(recorder.saw("open:3"), "an open action asks for the clip it names");
+}
+
+TEST(transport_action_reports_a_refusal_and_an_invalid_action_is_inert) {
+	RecordingCommands recorder;
+	media::ControllerModel model;
+	media::TransportExecutor executor(recorder, model, nullptr);
+
+	// The common case: nothing was touched this frame.
+	media::TransportAction nothing;
+	checkEqStr(executor.perform(nothing), "",
+		"an action that is not valid does nothing at all");
+	checkEq(recorder.calls.size(), std::size_t{0},
+		"an invalid action issues no request");
+
+	media::TransportAction play;
+	play.valid = true;
+	play.command = media::ControlCommand::PlayPause;
+	recorder.refuseEverything = true;
+	recorder.refusal = "player is gone";
+	const std::string message = executor.perform(play);
+	check(message.find("player is gone") != std::string::npos,
+		"a refused command reports the player's own reason");
+	check(message.find("player") != std::string::npos,
+		"the report says which side refused");
+}
+
+TEST(transport_executor_owns_the_script_actions) {
+	RecordingCommands recorder;
+	media::ControllerModel model;
+
+	// No script host at all is a normal state - Lua may not have started - and
+	// it must report rather than crash.
+	media::TransportExecutor bare(recorder, model, nullptr);
+	check(!bare.scripting(), "an executor with no script host says so");
+
+	media::TransportAction reload;
+	reload.valid = true;
+	reload.reloadScript = true;
+	const std::string noHost = bare.perform(reload);
+	check(noHost.find("script") != std::string::npos,
+		"reloading with no script host reports it");
+
+	media::TransportAction stop;
+	stop.valid = true;
+	stop.stopScript = true;
+	check(bare.perform(stop).find("script") != std::string::npos,
+		"stopping with no script host reports it");
+	checkEq(recorder.calls.size(), std::size_t{0},
+		"a script action never becomes a player request");
+}
+
+TEST(transport_executor_applies_a_chosen_folder_through_the_player) {
+	RecordingCommands recorder;
+	media::ControllerModel model;
+	media::TransportExecutor executor(recorder, model, nullptr);
+
+	// The picker is a callback because the real one is a modal Win32 dialog and
+	// this library is linked by the headless tests. A stub proves the executor
+	// does the right thing with each of its three answers.
+	executor.setFolderPicker([](const std::string&) {
+		media::TransportExecutor::FolderChoice choice;
+		choice.cancelled = true;
+		return choice;
+	});
+	media::TransportAction choose;
+	choose.valid = true;
+	choose.chooseFolder = true;
+	checkEqStr(executor.perform(choose), "", "cancelling the picker says nothing");
+	checkEq(recorder.calls.size(), std::size_t{0}, "cancelling sets no folder");
+
+	executor.setFolderPicker([](const std::string&) {
+		media::TransportExecutor::FolderChoice choice;
+		choice.path = "D:\\Corpus";
+		return choice;
+	});
+	recorder.calls.clear();
+	const std::string chosen = executor.perform(choose);
+	check(chosen.find("D:\\Corpus") != std::string::npos,
+		"a chosen folder is reported back");
+	check(recorder.saw("folder:D:\\Corpus"),
+		"the choice is handed to the Player, which owns the setting");
+
+	// The picker that cannot run at all - a build with no shell dialog - is a
+	// message rather than a silence, so an operator knows why nothing opened.
+	media::TransportExecutor noPicker(recorder, model, nullptr);
+	check(noPicker.perform(choose).find("picker") != std::string::npos,
+		"with no picker at all, the executor says so");
 }
 
 TEST(controller_state_reports_change_only_for_visible_fields) {
@@ -1687,13 +1857,13 @@ TEST(ui_scale_keeps_text_readable_on_a_dense_display) {
 // ---------------------------------------------------------------------------
 TEST(controller_corpus_panel_reports_the_folder_and_the_clip_count) {
 	media::ControllerModel model;
-	model.setUiScale(2.0f);
 
 	// Offline: there is no folder to report, and the panel says what to do
 	// instead of showing a stale path.
-	check(model.corpusValue().find("START THE PLAYER") != std::string::npos,
+	check(model.corpusValue().find("start the Player") != std::string::npos,
 		"offline, the panel asks for the player rather than naming a folder");
 	check(!model.corpusChosen(), "offline is not a chosen corpus");
+	checkEqStr(model.corpusLabel(), "MEDIA FOLDER", "the field has a fixed label");
 
 	media::ControllerState online;
 	online.online = true;
@@ -1703,11 +1873,11 @@ TEST(controller_corpus_panel_reports_the_folder_and_the_clip_count) {
 
 	// The no-folder case: readable, explicit, and not an error.
 	check(!model.corpusChosen(), "the default folder is not a chosen corpus");
-	check(model.corpusValue().find("NOT SET") != std::string::npos,
+	check(model.corpusValue().find("not set") != std::string::npos,
 		"an unset folder is spelled out");
-	check(model.corpusValue().find("0 VIDEOS") != std::string::npos,
+	check(model.corpusValue().find("0 videos") != std::string::npos,
 		"an empty corpus reports 0 videos");
-	checkEqStr(model.titleText(), "NO CLIPS", "an empty playlist still says NO CLIPS");
+	checkEqStr(model.titleText(), "No clips", "an empty playlist still says there are no clips");
 
 	media::ControllerState loaded = online;
 	loaded.loaded = true;
@@ -1719,63 +1889,19 @@ TEST(controller_corpus_panel_reports_the_folder_and_the_clip_count) {
 	model.applyState(loaded);
 
 	check(model.corpusChosen(), "a reported folder counts as chosen");
-	check(model.corpusValue().find("1 VIDEO") != std::string::npos,
+	check(model.corpusValue().find("1 video") != std::string::npos,
 		"a single clip is reported in the singular");
-	check(model.corpusValue().find("2026") != std::string::npos,
-		"the panel names the folder");
+	// The field shows the tail of the path, not all of it: a corpus path is far
+	// longer than the field, and the tail is what identifies the folder.
+	check(model.corpusValue().find("Shows\\2026") != std::string::npos,
+		"the field names the tail of the folder");
 
-	// The field must be clickable and must not swallow a transport click.
-	const float width = static_cast<float>(media::ControllerModel::kDefaultWidth);
-	const float height = static_cast<float>(media::ControllerModel::kDefaultHeight);
-	model.layout(width, height);
-	const media::Rect corpus = model.layout().corpusArea;
-	check(!corpus.empty(), "the corpus field is laid out when the player is up");
-	check(model.corpusHit(corpus.centreX(), corpus.centreY()),
-		"a click on the corpus field is a corpus click");
-	check(model.hitTest(corpus.centreX(), corpus.centreY()) == media::ControlCommand::None,
-		"the corpus field is not a transport button");
-	check(!model.corpusHit(corpus.x, corpus.y - 60.0f),
-		"a click above the corpus field is not a corpus click");
-	check(corpus.y + corpus.h <= height + 0.5f, "the corpus field ends inside the bar");
-
-	// The bands must not overlap at any DPI scale. This is the check that
-	// matters: the corpus field is fitted between the transport row and the
-	// seek bar, and getting the space budget wrong there draws the folder
-	// straight through the buttons without failing anything else.
-	//
-	// Each iteration is laid out at the size the application would really ask
-	// for at that scale (default size x scale), because that is the pair the
-	// window and the layout are in step at.
-	const float scales[] = {1.0f, 1.25f, 1.5f, 2.0f, 3.0f};
-	for (const float scale : scales) {
-		media::ControllerModel scaled;
-		scaled.setUiScale(scale);
-		scaled.applyState(loaded);
-		scaled.layout(static_cast<float>(media::ControllerModel::kDefaultWidth) * scale,
-			static_cast<float>(media::ControllerModel::kDefaultHeight) * scale);
-		const media::ControllerLayout& out = scaled.layout();
-		const std::string at = " at " + std::to_string(scale) + "x";
-
-		check(!out.corpusArea.empty(), "the corpus field is laid out" + at);
-		check(out.corpusArea.h >= media::ui::kGlyphHeight
-				* media::ui::textScale(scale, 15.0f),
-			"the corpus field fits its own text" + at);
-
-		float buttonsBottom = 0.0f;
-		for (const media::ControlButton& button : out.buttons) {
-			check(!out.corpusArea.hit(button.rect.centreX(), button.rect.centreY()),
-				"the corpus field does not overlap the transport row" + at);
-			buttonsBottom = std::max(buttonsBottom, button.rect.y + button.rect.h);
-			check(button.rect.y + button.rect.h <= out.corpusArea.y + 0.5f,
-				"a transport button ends above the corpus field" + at);
-		}
-		check(out.corpusArea.y + out.corpusArea.h <= out.seekBar.y + 0.5f,
-			"the corpus field ends above the seek bar" + at);
-		check(buttonsBottom > 0.0f, "the transport row has height" + at);
-		check(out.seekBar.y + out.seekBar.h
-				<= static_cast<float>(media::ControllerModel::kDefaultHeight) * scale + 0.5f,
-			"the seek bar ends inside the bar" + at);
-	}
+	// A default-corpus spelling is treated as "nothing chosen" whichever way the
+	// Player reports it, because both mean the same thing to an operator.
+	media::ControllerState defaulted = loaded;
+	defaulted.mediaFolder = "(default)";
+	model.applyState(defaulted);
+	check(!model.corpusChosen(), "the literal '(default)' is not a chosen corpus");
 }
 
 // ---------------------------------------------------------------------------

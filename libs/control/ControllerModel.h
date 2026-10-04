@@ -1,17 +1,19 @@
 #pragma once
 
-#include "gfx/RenderDevice.h"
-
 #include <cstddef>
 #include <string>
-#include <vector>
 
 namespace media {
 
-/// Transport actions the Controller bar can issue. Each one maps onto exactly
-/// one route of the Player's documented HTTP API — the request-building code
-/// and the tests both switch on this enum, so the two can never drift apart
+/// Transport actions the Controller can issue. Each one maps onto exactly one
+/// route of the Player's documented HTTP API - the request-building code and
+/// the tests both switch on this enum, so the two can never drift apart
 /// silently.
+///
+/// `PlayPause`, `ToggleHud`, `ToggleFullscreen` and `ToggleSubtitles` are
+/// toggles on the wire even though their names read as actions: the Player's
+/// protocol carries booleans, so PlayerCommands::send() resolves each of them to
+/// an absolute value from the latest snapshot.
 enum class ControlCommand {
 	None,
 	Previous,
@@ -55,69 +57,34 @@ struct ControllerState {
 
 	/// The folder the Player is reading its corpus from, as it reports on
 	/// /api/status. Empty means the Player is using its default data folder, or
-	/// has not been reached yet - the corpus rectangle distinguishes the two
-	/// using `online`.
+	/// has not been reached yet - the interface distinguishes the two using
+	/// `online`.
 	std::string mediaFolder;
 
 	/// How many clips that folder yielded. Needed separately from clipCount
 	/// because the two differ in exactly the case that matters: an unset or
-	/// empty corpus is 0 videos, which must not look like an error.
+	/// empty corpus is 0 videos, which must not look like a failure.
 	std::size_t corpusClipCount = 0;
 
 	/// Why the last poll failed; empty when online.
 	std::string lastError;
 };
 
-/// One drawable, clickable button on the bar.
-struct ControlButton {
-	ControlCommand command = ControlCommand::None;
-	std::string label;
-	Rect rect;
-	/// False when the command makes no sense for the current state (no clip
-	/// loaded, an image that cannot be paused, ...). Drawn dimmed, not clicked.
-	bool enabled = true;
-
-	bool hit(float x, float y) const {
-		return x >= rect.x && x < rect.x + rect.w
-			&& y >= rect.y && y < rect.y + rect.h;
-	}
-};
-
-/// Where the bar puts everything, in pixels.
-struct ControllerLayout {
-	std::vector<ControlButton> buttons;
-	Rect statusChip;
-	Rect titleArea;
-	Rect seekBar;
-	Rect errorStrip;
-	Rect volumeArea;
-	Rect speedArea;
-	/// The "media corpus folder" field. Clicking it opens the OS folder picker.
-	/// Drawn whenever there is room, so the folder is visible at a glance and
-	/// not only once the Player has been reached.
-	Rect corpusArea;
-};
-
-/// The Controller's presentation logic: status in, layout and hit tests out.
+/// The Controller's state, and the small amount of derived text its interface
+/// shows.
 ///
-/// Contains no GL, no HTTP and no Lua, which is what makes it unit-testable
-/// without a window. The frame loop owns one instance on the main thread.
+/// Contains no GL, no ImGui, no HTTP and no Lua - and, since the interface
+/// became ImGui, no geometry either. Layout used to live here as rectangles
+/// hit-tested by hand, because there was no widget toolkit; ImGui lays out its
+/// own widgets and reports what the operator did, so this class is now purely
+/// the state a panel reads and the labels it shows.
+///
+/// That is what keeps it unit-testable with no window, and it is why the tests
+/// that watched for overlapping rectangles are gone: nothing here can overlap
+/// any more.
 class ControllerModel {
 public:
-	/// Default bar size, in framebuffer pixels at 100% DPI. controller_main.cpp
-	/// asks for exactly this: the layout is written in text units scaled by the
-	/// monitor's content scale, so this is the size that must hold the identity
-	/// row, the transport row, the media corpus field and the seek bar *at a
-	/// real DPI scale*. The window is not multiplied by that scale - GLFW's
-	/// window size is already in DPI-virtualized screen coordinates, so scaling
-	/// it too would give a window uiScale times too big for its own contents.
-	/// layout() drops the corpus field rather than squeezing the transport
-	/// labels if a window is made shorter than that.
-	static constexpr int kDefaultWidth = 980;
-	static constexpr int kDefaultHeight = 240;
-
-	/// Replace the snapshot. Returns true when anything visible changed, so the
-	/// caller can decide whether the bar needs redrawing.
+	/// Replace the snapshot. Returns true when anything visible changed.
 	bool applyState(const ControllerState& next);
 
 	/// Mark the Player unreachable, keeping the reason for the error strip.
@@ -125,38 +92,21 @@ public:
 
 	const ControllerState& state() const { return state_; }
 
-	/// Set the DPI/text scale before the first layout(). Every pixel constant
-	/// below is multiplied by it, so the bar grows with the font instead of the
-	/// text overflowing a fixed-height row.
-	void setUiScale(float scale);
-	float uiScale() const { return uiScale_; }
-
-	/// Recompute the bar for a pixel size. Call on start and on every resize.
-	void layout(float width, float height);
-
-	const ControllerLayout& layout() const { return layout_; }
-
-	/// Which button is under (x, y), or kNone. Disabled buttons are skipped.
-	ControlCommand hitTest(float x, float y) const;
-
-	/// True when (x, y) is inside the corpus field, i.e. the click means
-	/// "choose the media folder" rather than a transport command.
-	bool corpusHit(float x, float y) const;
-
-	/// Map a point on the seek bar to a 0..100 percentage. Returns false when
-	/// the point is outside the bar, so the caller can ignore the click.
-	bool seekPercentAt(float x, float y, double& percentOut) const;
-
 	/// True when the current clip can actually be seeked: a still image has no
-	/// timeline, so the bar must not pretend to scrub one.
+	/// timeline, so the interface must not pretend to scrub one.
 	bool seekBarActive() const;
 
-	/// Human-readable one-liner for the title area.
+	/// Where the seek bar should sit, as a percentage of the clip, clamped to
+	/// 0..100. The panel feeds this into ImGui and acts only on what the
+	/// operator changes.
+	double seekPercent() const;
+
+	/// Human-readable one-liner for the status row.
 	std::string titleText() const;
 
-	/// What the corpus field shows. Split in two so the view can draw the fixed
-	/// "MEDIA FOLDER:" prefix dim and the state in a colour that carries the
-	/// meaning: a path when one is set, the click-to-choose prompt when not.
+	/// What the media-corpus field shows. Split in two so the panel can draw the
+	/// fixed "MEDIA FOLDER:" prefix dim and the state in a colour that carries
+	/// the meaning: a path when one is set, the click-to-choose prompt when not.
 	std::string corpusLabel() const;
 	std::string corpusValue() const;
 
@@ -165,16 +115,14 @@ public:
 	/// an error.
 	bool corpusChosen() const;
 
-	/// One line of feedback the bar shows (the last command's refusal, or what
-	/// a script reported). Empty means "show nothing".
+	/// One line of feedback the interface shows (the last command's refusal, or
+	/// what a script reported). Empty means "show nothing".
 	void setMessage(std::string message);
 	const std::string& message() const { return message_; }
 
 private:
 	ControllerState state_;
-	ControllerLayout layout_;
 	std::string message_;
-	float uiScale_ = 1.0f;
 };
 
 } // namespace media

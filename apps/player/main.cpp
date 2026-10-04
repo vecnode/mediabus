@@ -11,6 +11,7 @@
 #include "net/HttpControlServer.h"
 #include "gfx/BitmapFont.h"
 #include "gfx/UiScaleGlfw.h"
+#include "gfx/GlLoader.h"
 #include "gfx/RenderDevice.h"
 #include "mpv/MPVSurface.h"
 #include "core/AppConfig.h"
@@ -260,9 +261,11 @@ int main(int argc, char** argv) {
 	glfwSetWindowUserPointer(gWindow, &presentation);
 	glfwSetKeyCallback(gWindow, onKey);
 
-	const GLenum glewStatus = glewInit();
-	if (glewStatus != GLEW_OK) {
-		LOG_ERROR("App") << "glewInit failed: " << glewGetErrorString(glewStatus);
+	// GLEW through the shared helper: correct ordering, and the drain that
+	// clears the spurious core-profile GL_INVALID_ENUM glewInit leaves in the
+	// error queue. See libs/gfx/GlLoader.h.
+	if (!media::gfx::initializeGlLoader(gWindow)) {
+		LOG_ERROR("App") << "glewInit failed";
 		glfwDestroyWindow(gWindow);
 		glfwTerminate();
 		return 1;

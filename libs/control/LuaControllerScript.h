@@ -104,6 +104,20 @@ public:
 	/// The loaded script registered an OnTick handler.
 	bool hasTickHandler() const { return tickRef_ != kTickRefNone; }
 
+	/// How much of one tick's wall-clock budget the running script has spent, as
+	/// a fraction of kTickBudgetClockMs. 0 when nothing is running.
+	///
+	/// This exists for the interface: an operator watching a sequence wants to
+	/// know when it is close to being cut off for taking too long, and the
+	/// number is otherwise invisible until a script is aborted mid-sequence.
+	float tickBudgetFraction() const {
+		if (tickRef_ == kTickRefNone || kTickBudgetClockMs <= 0.0) {
+			return 0.0f;
+		}
+		const double fraction = tickSpentMs_ / kTickBudgetClockMs;
+		return static_cast<float>(fraction < 0.0 ? 0.0 : (fraction > 1.0 ? 1.0 : fraction));
+	}
+
 	/// Called once per frame. Runs the OnTick handler with a fresh budget.
 	/// Returns false when the script raised an error this tick; it is reported
 	/// through lastError() and the script is stopped with a backoff.

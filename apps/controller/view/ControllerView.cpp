@@ -1,244 +1,414 @@
 #include "view/ControllerView.h"
 
-#include "gfx/BitmapFont.h"
-#include "gfx/RenderDevice.h"
-#include "core/UiScale.h"
+#include "ui/UiLayer.h"
+
+// The ImGui fence: this file may include imgui.h because it is application UI.
+// It must not include a GL header (that is what UiLayer is for), and it must not
+// include the HTTP client or the Lua headers, because drawing is not allowed to
+// talk to the Player.
+#include <imgui.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
+#include <string>
 
 namespace media {
 namespace {
 
-// Palette. Kept in one place so the bar reads as a single surface.
-constexpr std::uint8_t kPanelR = 0x1D, kPanelG = 0x22, kPanelB = 0x2B;
-constexpr std::uint8_t kEdgeR = 0x2C, kEdgeG = 0x35, kEdgeB = 0x42;
-constexpr std::uint8_t kTextR = 0xE6, kTextG = 0xEA, kTextB = 0xF2;
-constexpr std::uint8_t kDimR = 0x86, kDimG = 0x96, kDimB = 0xA8;
-constexpr std::uint8_t kAccentR = 0x2E, kAccentG = 0x9E, kAccentB = 0xFF;
-constexpr std::uint8_t kOkR = 0x3D, kOkG = 0xC8, kOkB = 0x7A;
-constexpr std::uint8_t kBadR = 0xE0, kBadG = 0x5A, kBadB = 0x54;
-
-void fill(RenderDevice& device, const Rect& r,
-	std::uint8_t x, std::uint8_t y, std::uint8_t z, std::uint8_t a) {
-	if (r.empty()) {
-		return;
-	}
-	device.drawSolid(r, x, y, z, a);
+/// Theme colours arrive as 0xRRGGBB. ui/UiLayer.h has no ImGui type in it, so
+/// this conversion lives here rather than there.
+ImVec4 toImVec4(std::uint32_t rgb, float alpha = 1.0f) {
+	return ImVec4(
+		static_cast<float>((rgb >> 16) & 0xFFu) / 255.0f,
+		static_cast<float>((rgb >> 8) & 0xFFu) / 255.0f,
+		static_cast<float>(rgb & 0xFFu) / 255.0f,
+		alpha);
 }
 
-/// Draw text centred horizontally and vertically inside `r`.
-void centredText(RenderDevice& device, const std::string& text, const Rect& r,
-	float scale, std::uint8_t x, std::uint8_t y, std::uint8_t z) {
-	if (r.empty() || text.empty()) {
-		return;
-	}
-	const float width = hud::textWidth(text, scale);
-	const float textX = r.x + std::max(0.0f, (r.w - width) * 0.5f);
-	const float textY = r.y + std::max(0.0f, (r.h - hud::kGlyphHeight * scale) * 0.5f);
-	device.drawText(text, textX, textY, scale, x, y, z);
-}
-
-/// Clip a one-line message to `width` pixels, adding an ellipsis when cut.
-/// `scale` matters: the character pitch grows with the font, so a width that
-/// fits at scale 1 overflows at scale 2.
-std::string clipToWidth(const std::string& text, float width, float scale) {
-	const float advance = (hud::kGlyphWidth + 1.0f) * std::max(0.01f, scale);
-	const std::size_t maxChars = static_cast<std::size_t>(
-		std::max(0.0f, width) / advance);
-	if (maxChars == 0 || text.size() <= maxChars) {
-		return text;
-	}
-	if (maxChars <= 3) {
-		return text.substr(0, maxChars);
-	}
-	return text.substr(0, maxChars - 3) + "...";
-}
-
-/// "M:SS" for a duration in seconds; "--:--" when there is no timeline.
-std::string clockText(double seconds) {
-	if (!(seconds > 0.0)) {
+/// mm:ss, or h:mm:ss past an hour. A negative or unknown time prints as --:--,
+/// which is what an image and an unreached Player both want.
+std::string clock(double seconds) {
+	if (!(seconds >= 0.0) || seconds > 359999.0) {
 		return "--:--";
 	}
 	const int total = static_cast<int>(seconds + 0.5);
-	char buffer[16];
-	std::snprintf(buffer, sizeof(buffer), "%d:%02d", total / 60, total % 60);
+	const int s = total % 60;
+	const int m = (total / 60) % 60;
+	const int h = total / 3600;
+	char buffer[32];
+	if (h > 0) {
+		std::snprintf(buffer, sizeof(buffer), "%d:%02d:%02d", h, m, s);
+	} else {
+		std::snprintf(buffer, sizeof(buffer), "%d:%02d", m, s);
+	}
 	return buffer;
 }
 
-} // namespace
-
-void ControllerView::drawButton(RenderDevice& device, const ControlButton& button,
-	float textScale) const {
-	const bool dim = !button.enabled;
-
-	fill(device, button.rect, kPanelR, kPanelG, kPanelB, dim ? 0x80 : 0xFF);
-	device.drawOutline(button.rect, 1.0f, kEdgeR, kEdgeG, kEdgeB, dim ? 0x80 : 0xFF);
-
-	const std::uint8_t textR = dim ? kDimR : kTextR;
-	const std::uint8_t textG = dim ? kDimG : kTextG;
-	const std::uint8_t textB = dim ? kDimB : kTextB;
-	centredText(device, button.label, button.rect, textScale, textR, textG, textB);
+/// Right-align the next item inside the current window, when there is room.
+/// Used for the status endpoint, the duration and the button groups: without it
+/// every row would be left-packed and the window would look unfinished at any
+/// width wider than its contents.
+void alignRight(float itemWidth) {
+	const float target = ImGui::GetWindowWidth() - itemWidth
+		- ImGui::GetStyle().WindowPadding.x;
+	if (ImGui::GetCursorPosX() < target) {
+		ImGui::SetCursorPosX(target);
+	}
 }
 
-void ControllerView::draw(RenderDevice& device, const ControllerModel& model) const {
-	const ControllerLayout& layout = model.layout();
-	const ControllerState& state = model.state();
-	const bool seekActive = model.seekBarActive();
+/// The transport row. The label is what the operator reads; Play/Pause resolves
+/// its own label from the current state.
+struct TransportButton {
+	ControlCommand command;
+	const char* label;
+	const char* tooltip;
+	bool primary;
+};
 
-	// Every text size comes from the model's DPI scale through the shared
-	// helper, so the three windows cannot disagree about how big "body text"
-	// is. Scales are distinct per role: a transport label is bigger than the
-	// status chip, which is bigger than a folder path.
-	const float uiScale = model.uiScale();
-	const float titleScale = ui::textScale(uiScale, 15.0f);
-	const float smallScale = ui::textScale(uiScale, 14.0f);
-	const float buttonScale = ui::textScale(uiScale, 22.0f);
-	const float corpusScale = ui::textScale(uiScale, 15.0f);
-	const float s = uiScale;
+const TransportButton kTransport[] = {
+	{ControlCommand::Previous, "|<", "Previous clip", false},
+	{ControlCommand::PlayPause, "Play", "Play or pause (Space)", true},
+	{ControlCommand::Stop, "Stop", "Stop the Player", false},
+	{ControlCommand::Next, ">|", "Next clip", false},
+};
 
-	// ---- status chip -----------------------------------------------------
-	const Rect& chip = layout.statusChip;
-	if (!chip.empty()) {
-		const bool online = state.online;
-		fill(device, chip, online ? kOkR : kBadR, online ? kOkG : kBadG,
-			online ? kOkB : kBadB, 0xFF);
-		centredText(device, online ? "ONLINE" : "OFFLINE", chip, smallScale,
-			0x08, 0x0A, 0x0C);
+} // namespace
+
+ControllerPanel::Frame ControllerPanel::draw(ui::UiLayer& ui, const ControllerModel& model,
+	const std::string& scriptName, const std::string& scriptError,
+	bool scriptRunning) {
+	(void)ui;
+	Frame frame;
+
+	const ImGuiIO& io = ImGui::GetIO();
+	// Fill the whole window. NoMove/NoResize/NoCollapse because this window IS
+	// the application frame: a panel that could be dragged out of its own OS
+	// window, or collapsed to a title bar, would look broken.
+	const ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar
+		| ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove
+		| ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus
+		| ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+
+	ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f));
+	ImGui::SetNextWindowSize(io.DisplaySize);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+	ImGui::Begin("##controller", nullptr, flags);
+	ImGui::PopStyleVar(2);
+
+	drawStatusRow(model);
+	ImGui::Separator();
+	drawTransport(const_cast<ControllerModel&>(model), frame);
+	drawSeek(model, frame);
+	drawCorpus(model, frame);
+	drawScripts(model, scriptName, scriptError, scriptRunning, frame);
+
+	// The message strip is pinned to the bottom rather than left where it lands:
+	// it is the line an operator reads when something was refused, so it must
+	// not move around.
+	const float stripHeight = ImGui::GetTextLineHeightWithSpacing() * 1.8f;
+	const float bottom = ImGui::GetWindowHeight() - stripHeight
+		- ImGui::GetStyle().WindowPadding.y;
+	if (ImGui::GetCursorPosY() < bottom) {
+		ImGui::SetCursorPosY(bottom);
+	}
+	drawMessage(model);
+
+	// Esc closes the window, as it did before the interface changed. ImGui owns
+	// the keyboard while a field has focus, so a text field's Esc is not a quit.
+	if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+		frame.requestQuit = true;
 	}
 
-	// ---- title -----------------------------------------------------------
-	if (!layout.titleArea.empty()) {
-		device.drawText(clipToWidth(model.titleText(), layout.titleArea.w, titleScale),
-			layout.titleArea.x, layout.titleArea.y + 2.0f * s, titleScale,
-			kTextR, kTextG, kTextB);
-	}
+	ImGui::End();
+	return frame;
+}
 
-	// ---- media corpus folder ---------------------------------------------
-	// Always visible while the Player is up, whether or not a folder has been
-	// chosen: "NOT SET - 0 VIDEOS" is a state the operator needs to see, and
-	// the field is also the control that fixes it.
-	const Rect& corpus = layout.corpusArea;
-	if (!corpus.empty()) {
-		const bool chosen = model.corpusChosen();
-		// An empty corpus is drawn as a normal panel, not as an error: nothing
-		// has gone wrong, there is simply no folder selected yet.
-		std::uint8_t bgR = kPanelR;
-		std::uint8_t bgG = kPanelG;
-		std::uint8_t bgB = kPanelB;
-		std::uint8_t edgeR = kEdgeR;
-		std::uint8_t edgeG = kEdgeG;
-		std::uint8_t edgeB = kEdgeB;
-		std::uint8_t edgeA = 0xFF;
-		if (!chosen) {
-			bgR = 0x14; bgG = 0x17; bgB = 0x1D;
-			edgeR = kAccentR; edgeG = kAccentG; edgeB = kAccentB; edgeA = 0xC0;
+void ControllerPanel::drawStatusRow(const ControllerModel& model) {
+	const ControllerState& s = model.state();
+
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextColored(toImVec4(s.online ? 0x5CB85C : 0xD9534F), "%s",
+		s.online ? "ONLINE" : "OFFLINE");
+	ImGui::SameLine();
+	ImGui::TextDisabled("|");
+	ImGui::SameLine();
+
+	// The title carries the clip, its index and its transport state, so the row
+	// answers "what is playing" without a second look.
+	const std::string title = model.titleText();
+	ImGui::TextUnformatted(title.c_str());
+
+	if (!playerEndpoint_.empty()) {
+		ImGui::SameLine();
+		alignRight(ImGui::CalcTextSize(playerEndpoint_.c_str()).x);
+		ImGui::TextDisabled("%s", playerEndpoint_.c_str());
+	}
+}
+
+void ControllerPanel::drawTransport(ControllerModel& model, Frame& frame) {
+	const ControllerState& s = model.state();
+	// Everything except Play/Pause needs a loaded clip. Play/Pause is safe to
+	// offer whenever the Player answers: "play" against an empty playlist is a
+	// no-op there rather than an error.
+	const bool hasClip = s.online && s.loaded && s.clipCount > 0;
+	const float buttonWidth = std::max(84.0f, ImGui::GetFontSize() * 5.0f);
+
+	bool first = true;
+	for (const TransportButton& spec : kTransport) {
+		if (!first) {
+			ImGui::SameLine();
 		}
-		fill(device, corpus, bgR, bgG, bgB, 0xFF);
-		device.drawOutline(corpus, 1.0f, edgeR, edgeG, edgeB, edgeA);
+		first = false;
 
-		const float padX = 8.0f * s;
-		const float textY = corpus.y
-			+ std::max(0.0f, (corpus.h - hud::kGlyphHeight * corpusScale) * 0.5f);
-		const std::string label = model.corpusLabel();
-		const std::string value = model.corpusValue();
-		const float labelWidth = hud::textWidth(label, corpusScale);
-
-		// The label is a fixed dim prefix; the value carries the state, so its
-		// colour is what tells "a folder is set" from "nothing chosen yet".
-		device.drawText(label, corpus.x + padX, textY, corpusScale,
-			kDimR, kDimG, kDimB);
-		const std::uint8_t bodyR = chosen ? kTextR : kAccentR;
-		const std::uint8_t bodyG = chosen ? kTextG : kAccentG;
-		const std::uint8_t bodyB = chosen ? kTextB : kAccentB;
-		const float remaining = std::max(0.0f,
-			corpus.w - padX * 2.0f - labelWidth - hud::kGlyphWidth * corpusScale);
-		device.drawText(clipToWidth(value, remaining, corpusScale),
-			corpus.x + padX + labelWidth, textY, corpusScale,
-			bodyR, bodyG, bodyB);
-	}
-
-	// ---- transport row ---------------------------------------------------
-	// Two buttons show live state rather than a fixed label: play/pause flips
-	// with the transport, and HUD dims while the bar is hidden.
-	for (const ControlButton& button : layout.buttons) {
-		if (button.command == ControlCommand::PlayPause) {
-			ControlButton dynamicButton = button;
-			dynamicButton.label = (state.playing && !state.paused) ? "||" : ">";
-			drawButton(device, dynamicButton, buttonScale);
-			continue;
+		const bool enabled = s.online
+			&& (spec.command == ControlCommand::PlayPause || hasClip);
+		if (!enabled) {
+			ImGui::BeginDisabled();
 		}
-		if (button.command == ControlCommand::ToggleHud && !state.hudVisible) {
-			ControlButton dimmed = button;
-			dimmed.enabled = false;
-			drawButton(device, dimmed, buttonScale);
-			continue;
+		if (spec.primary) {
+			ImGui::PushStyleColor(ImGuiCol_Button, toImVec4(0x3A76A6));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, toImVec4(0x4B8BBE));
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive, toImVec4(0x2C5F87));
 		}
-		if (button.command == ControlCommand::ToggleSubtitles && !state.subtitlesEnabled) {
-			ControlButton dimmed = button;
-			dimmed.enabled = false;
-			drawButton(device, dimmed, buttonScale);
-			continue;
+		const std::string label = spec.primary
+			? ((s.playing && !s.paused) ? "Pause" : "Play") : spec.label;
+		if (ImGui::Button(label.c_str(), ImVec2(buttonWidth, 0.0f))) {
+			frame.action.valid = true;
+			frame.action.command = spec.command;
 		}
-		drawButton(device, button, buttonScale);
-	}
-
-	// ---- seek bar --------------------------------------------------------
-	const Rect& bar = layout.seekBar;
-	if (!bar.empty()) {
-		fill(device, bar, kPanelR, kPanelG, kPanelB, 0xFF);
-		double fraction = 0.0;
-		if (seekActive && state.duration > 0.0) {
-			fraction = state.position / state.duration;
-		} else if (state.clipCount > 0) {
-			// No timeline (a still image): show playlist position so the bar
-			// still reports something true instead of sitting empty.
-			fraction = static_cast<double>(state.clipIndex + 1)
-				/ static_cast<double>(state.clipCount);
+		if (spec.primary) {
+			ImGui::PopStyleColor(3);
 		}
-		fraction = std::max(0.0, std::min(1.0, fraction));
-		const Rect filled{bar.x, bar.y, bar.w * static_cast<float>(fraction), bar.h};
-		fill(device, filled, seekActive ? kAccentR : kDimR, seekActive ? kAccentG : kDimG,
-			seekActive ? kAccentB : kDimB, 0xFF);
-	}
-
-	// ---- readouts --------------------------------------------------------
-	if (!layout.volumeArea.empty()) {
-		centredText(device, "VOL " + std::to_string(static_cast<int>(state.volume + 0.5)),
-			layout.volumeArea, smallScale, kDimR, kDimG, kDimB);
-	}
-	if (!layout.speedArea.empty()) {
-		char buffer[24];
-		std::snprintf(buffer, sizeof(buffer), "%.2fX", state.speed);
-		centredText(device, buffer, layout.speedArea, smallScale, kDimR, kDimG, kDimB);
-	}
-
-	// Position/duration rides just above the seek bar when a timeline exists.
-	if (seekActive) {
-		const std::string clock = clockText(state.position) + " / " + clockText(state.duration);
-		const float width = hud::textWidth(clock, smallScale);
-		const float x = std::max(bar.x, bar.x + bar.w - width);
-		device.drawText(clock, x, bar.y - hud::kGlyphHeight * smallScale - 2.0f * s,
-			smallScale, kDimR, kDimG, kDimB);
-	}
-
-	// ---- message / error strip -------------------------------------------
-	// One line, either the last refusal or the last thing a script reported.
-	if (!layout.errorStrip.empty()) {
-		std::string message = model.message();
-		if (message.empty() && !state.online) {
-			message = state.lastError;
+		if (!enabled) {
+			ImGui::EndDisabled();
 		}
-		if (message.empty() && !state.online) {
-			message = "start the player to control it";
-		}
-		if (!message.empty()) {
-			device.drawText(clipToWidth(message, layout.errorStrip.w, smallScale),
-				layout.errorStrip.x, layout.errorStrip.y, smallScale,
-				state.online ? kDimR : kBadR, state.online ? kDimG : kBadG,
-				state.online ? kDimB : kBadB);
+		if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+			ImGui::SetTooltip("%s", spec.tooltip);
 		}
 	}
+
+	// The three Player toggles as labelled checkboxes. The Player's protocol
+	// carries each as an absolute boolean, so the checkbox shows the truth and a
+	// click sends the opposite.
+	ImGui::SameLine();
+	ImGui::Dummy(ImVec2(ImGui::GetStyle().ItemSpacing.x * 2.0f, 0.0f));
+	ImGui::SameLine();
+
+	struct ToggleSpec { ControlCommand command; const char* label; bool on; };
+	const ToggleSpec toggles[] = {
+		{ControlCommand::ToggleHud, "HUD", s.hudVisible},
+		{ControlCommand::ToggleFullscreen, "Fullscreen", s.fullscreen},
+		{ControlCommand::ToggleSubtitles, "Subtitles", s.subtitlesEnabled},
+	};
+	for (const ToggleSpec& toggle : toggles) {
+		if (!s.online) {
+			ImGui::BeginDisabled();
+		}
+		bool value = toggle.on;
+		if (ImGui::Checkbox(toggle.label, &value)) {
+			frame.action.valid = true;
+			frame.action.command = toggle.command;
+		}
+		if (!s.online) {
+			ImGui::EndDisabled();
+		}
+		ImGui::SameLine();
+	}
+
+	// --- volume and speed ---------------------------------------------------
+	// Both are drafts while the operator holds them, for the same reason the seek
+	// bar is: the poll thread keeps publishing the Player's own value, and the
+	// widget must not snap back under the operator's hand. A draft is dropped as
+	// soon as the widget is neither held nor hovered, so a change made elsewhere
+	// - by a Lua script, say - appears here.
+	const double zero = 0.0;
+	const double hundred = 100.0;
+	const double slowest = 0.1;
+	const double fastest = 4.0;
+
+	if (volumeDraft_ < 0.0) {
+		volumeDraft_ = s.volume;
+	}
+	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+	ImGui::SliderScalar("##volume", ImGuiDataType_Double, &volumeDraft_, &zero, &hundred,
+		"vol %.0f%%", ImGuiSliderFlags_AlwaysClamp);
+	if (!ImGui::IsItemActive() && !ImGui::IsItemHovered()) {
+		volumeDraft_ = s.volume;
+	}
+	if (ImGui::IsItemDeactivatedAfterEdit()) {
+		frame.action.valid = true;
+		frame.action.settingVolume = true;
+		frame.action.volume = volumeDraft_;
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Volume %d%%  (the Player reports %.0f%%)",
+			static_cast<int>(volumeDraft_ + 0.5), s.volume);
+	}
+
+	ImGui::SameLine();
+	if (speedDraft_ < 0.0) {
+		speedDraft_ = s.speed;
+	}
+	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
+	ImGui::SliderScalar("##speed", ImGuiDataType_Double, &speedDraft_, &slowest, &fastest,
+		"%.2fx", ImGuiSliderFlags_AlwaysClamp);
+	if (!ImGui::IsItemActive() && !ImGui::IsItemHovered()) {
+		speedDraft_ = s.speed;
+	}
+	if (ImGui::IsItemDeactivatedAfterEdit()) {
+		frame.action.valid = true;
+		frame.action.settingSpeed = true;
+		frame.action.speed = speedDraft_;
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Playback speed (the Player reports %.2fx)", s.speed);
+	}
+}
+
+void ControllerPanel::drawSeek(const ControllerModel& model, Frame& frame) {
+	const ControllerState& s = model.state();
+	const bool active = model.seekBarActive();
+
+	// While the operator drags, the draft is the truth; otherwise the Player's
+	// own position is. This is the one piece of state the panel keeps, and it
+	// lasts exactly as long as a drag.
+	if (!seekDragging_) {
+		seekDraft_ = model.seekPercent();
+	}
+
+	ImGui::BeginDisabled(!active);
+	ImGui::SetNextItemWidth(-1.0f);
+	// A percentage in a float: ample precision for a scrub bar, and it keeps the
+	// widget to the common type.
+	float percent = static_cast<float>(seekDraft_);
+	if (ImGui::SliderFloat("##seek", &percent, 0.0f, 100.0f, "",
+		ImGuiSliderFlags_AlwaysClamp)) {
+		seekDraft_ = percent;
+	}
+	if (ImGui::IsItemActive()) {
+		seekDragging_ = true;
+	} else if (seekDragging_) {
+		// The drag ended: this is the moment to send it. Sending on every frame of
+		// a drag would be a seek storm against the decoder.
+		seekDragging_ = false;
+		frame.action.valid = true;
+		frame.action.seeking = true;
+		frame.action.seekPercent = seekDraft_;
+	}
+	ImGui::EndDisabled();
+
+	// Under the bar: elapsed on the left, duration on the right. An image has no
+	// timeline, so both read as dashes rather than as a misleading 0:00.
+	const std::string elapsed = active ? clock(s.position) : std::string("--:--");
+	const std::string total = (active && s.duration > 0.0) ? clock(s.duration)
+		: std::string("--:--");
+	ImGui::TextDisabled("%s", elapsed.c_str());
+	ImGui::SameLine();
+	alignRight(ImGui::CalcTextSize(total.c_str()).x);
+	ImGui::TextDisabled("%s", total.c_str());
+
+	// A still image is the one case worth explaining: without this, a disabled
+	// seek bar looks like a bug rather than a fact about the clip.
+	if (s.online && s.loaded && s.isImage) {
+		ImGui::TextDisabled("a still image has no timeline");
+	}
+}
+
+void ControllerPanel::drawCorpus(const ControllerModel& model, Frame& frame) {
+	const ControllerState& s = model.state();
+	const float buttonWidth = ImGui::GetFontSize() * 6.5f;
+
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextDisabled("%s", model.corpusLabel().c_str());
+	ImGui::SameLine();
+
+	// The value carries the meaning, so its colour does: a real folder is normal
+	// text, "not set" is dim, and an offline Player is a warning rather than an
+	// error - nothing is wrong, there is simply nothing to ask yet.
+	const std::string value = model.corpusValue();
+	if (!s.online) {
+		ImGui::TextColored(toImVec4(0xD9A441), "%s", value.c_str());
+	} else if (!model.corpusChosen()) {
+		ImGui::TextDisabled("%s", value.c_str());
+	} else {
+		ImGui::TextUnformatted(value.c_str());
+		if (ImGui::IsItemHovered()) {
+			// The field shows the tail of the path; the tooltip shows all of it.
+			ImGui::SetTooltip("%s", s.mediaFolder.c_str());
+		}
+	}
+
+	ImGui::SameLine();
+	alignRight(buttonWidth);
+	if (ImGui::Button("Change...", ImVec2(buttonWidth, 0.0f))) {
+		frame.action.valid = true;
+		frame.action.chooseFolder = true;
+	}
+	if (ImGui::IsItemHovered()) {
+		ImGui::SetTooltip("Choose the folder the Player reads its media from");
+	}
+}
+
+void ControllerPanel::drawScripts(const ControllerModel& model,
+	const std::string& scriptName, const std::string& scriptError,
+	bool scriptRunning, Frame& frame) {
+	ImGui::Separator();
+	ImGui::AlignTextToFramePadding();
+
+	if (scriptName.empty()) {
+		ImGui::TextDisabled("Script: none running");
+	} else {
+		ImGui::TextColored(toImVec4(0x5CB85C), "Script: %s", scriptName.c_str());
+		ImGui::SameLine();
+		if (scriptRunning) {
+			// How much of this tick's budget the script has spent. An operator
+			// watching a sequence wants to know how close it is to being cut off,
+			// and a bar is quicker to read than a number.
+			ImGui::ProgressBar(std::min(1.0f, std::max(0.0f, scriptBudget_)),
+				ImVec2(ImGui::GetFontSize() * 6.0f, ImGui::GetFontSize()));
+			ImGui::SameLine();
+		}
+		ImGui::TextDisabled("%s", scriptRunning ? "running" : "stopped");
+	}
+
+	const float buttonWidth = ImGui::GetFontSize() * 5.0f;
+	ImGui::SameLine();
+	alignRight(buttonWidth * 2.0f + ImGui::GetStyle().ItemSpacing.x);
+	ImGui::BeginDisabled(scriptName.empty());
+	if (ImGui::Button("Reload", ImVec2(buttonWidth, 0.0f))) {
+		frame.action.valid = true;
+		frame.action.reloadScript = true;
+	}
+	if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+		ImGui::SetTooltip("Re-read the script from disk now (R)");
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("Stop", ImVec2(buttonWidth, 0.0f))) {
+		frame.action.valid = true;
+		frame.action.stopScript = true;
+	}
+	ImGui::EndDisabled();
+
+	// The script's last failure, or failing that its last log line: one line
+	// either way, so a chatty script cannot push the transport controls off the
+	// window.
+	if (!scriptError.empty()) {
+		ImGui::TextColored(toImVec4(0xD9534F), "%s", scriptError.c_str());
+	} else if (!scriptLog_.empty()) {
+		ImGui::TextDisabled("%s", scriptLog_.c_str());
+	}
+	(void)model;
+}
+
+void ControllerPanel::drawMessage(const ControllerModel& model) {
+	const std::string& message = model.message();
+	if (message.empty()) {
+		return;
+	}
+	ImGui::Separator();
+	ImGui::TextWrapped("%s", message.c_str());
 }
 
 } // namespace media

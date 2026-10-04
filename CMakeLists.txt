@@ -130,6 +130,7 @@ add_library(mediabus_control STATIC
     libs/control/DashboardModel.cpp
     libs/control/LuaControllerScript.cpp
     libs/control/PlayerClient.cpp
+    libs/control/TransportAction.cpp
 )
 target_link_libraries(mediabus_control PUBLIC mediabus_core mediabus_net)
 if(LUA51_FOUND)
@@ -321,6 +322,7 @@ if(MEDIA_BUILD_TESTS)
         libs/control/ControllerModel.cpp
         libs/control/DashboardModel.cpp
         libs/control/LuaControllerScript.cpp
+        libs/control/TransportAction.cpp
         libs/gfx/BitmapFont.cpp
     )
     target_include_directories(vn-mediabus-tests PRIVATE ${CMAKE_SOURCE_DIR}/libs)

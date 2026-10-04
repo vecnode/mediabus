@@ -321,6 +321,17 @@ public:
 		glDisable(GL_SCISSOR_TEST);
 		scissorStack_.clear();
 		glUseProgram(program_);
+
+		// Blending is enabled once in initialize() and re-asserted here, every
+		// frame, deliberately. It is the one piece of state this device depends
+		// on and does not set per draw, so anything else running in the same
+		// frame - the ImGui backend, an mpv render callback, a future effect -
+		// could otherwise leave it disabled and silently turn every drawSolid
+		// and every glyph opaque. Three calls are cheaper than that class of bug.
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glDisable(GL_DEPTH_TEST);
+		glDisable(GL_CULL_FACE);
 	}
 
 	void endFrame() override {

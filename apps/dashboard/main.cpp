@@ -31,6 +31,7 @@
 #include "win32/FolderPicker.h"
 #include "gfx/UiScaleGlfw.h"
 #include "net/HttpJsonClient.h"
+#include "gfx/GlLoader.h"
 #include "gfx/RenderDevice.h"
 #include "core/AppConfig.h"
 #include "core/Log.h"
@@ -424,9 +425,11 @@ int main(int argc, char** argv) {
 	glfwMakeContextCurrent(gWindow);
 	glfwSwapInterval(1);
 
-	const GLenum glewStatus = glewInit();
-	if (glewStatus != GLEW_OK) {
-		LOG_ERROR("Dashboard") << "glewInit failed: " << glewGetErrorString(glewStatus);
+	// GLEW through the shared helper: correct ordering, and the drain that
+	// clears the spurious core-profile GL_INVALID_ENUM glewInit leaves in the
+	// error queue. See libs/gfx/GlLoader.h.
+	if (!media::gfx::initializeGlLoader(gWindow)) {
+		LOG_ERROR("Dashboard") << "glewInit failed";
 		glfwDestroyWindow(gWindow);
 		glfwTerminate();
 		return 1;

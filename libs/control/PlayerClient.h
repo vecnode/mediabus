@@ -47,6 +47,22 @@ struct PlayerCommands {
 	virtual bool setFullscreen(bool visible, std::string& error) = 0;
 	virtual bool setSubtitles(bool enabled, std::string& error) = 0;
 
+	/// Ask the Player to switch its media corpus folder and reload.
+	///
+	/// An empty `directory` means "back to the Player's default data folder".
+	/// This is the one route a Lua script cannot reach: choosing the corpus is an
+	/// operator decision, so it is deliberately absent from the script API.
+	///
+	/// The default implementation refuses, which is what a substitute that has no
+	/// notion of a corpus should do; PlayerClient overrides it with the real
+	/// route. The distinction matters to the caller: on a refusal it writes
+	/// mediabus.ini itself, so the choice survives to the next Player start.
+	virtual bool setMediaFolder(const std::string& directory, std::string& error) {
+		(void)directory;
+		error = "this player link cannot set the media folder";
+		return false;
+	}
+
 	virtual std::vector<PlayerClipInfo> playlist() const = 0;
 	virtual ControllerState state() const = 0;
 
@@ -132,7 +148,7 @@ public:
 	/// The Player validates and persists the choice; this returns false, with
 	/// `error` filled in, when it refuses or cannot be reached. That distinction
 	/// is what lets the caller decide whether to write mediabus.ini itself.
-	bool setMediaFolder(const std::string& directory, std::string& error);
+	bool setMediaFolder(const std::string& directory, std::string& error) override;
 
 	const std::string& host() const { return client_.host(); }
 	int port() const { return client_.port(); }

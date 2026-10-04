@@ -1,35 +1,81 @@
 #pragma once
 
 #include "control/ControllerModel.h"
+#include "control/TransportAction.h"
 
 #include <string>
 
+namespace media::ui {
+class UiLayer;
+}
+
 namespace media {
 
-class RenderDevice;
-
-/// Draws the Controller bar.
+/// Draws the Controller: status, transport, seek, volume, speed, the media
+/// corpus field and the message strip.
 ///
-/// Everything goes through RenderDevice: solid and outline rectangles plus the
-/// shared 5x7 bitmap font. This file must never name OpenGL, exactly like the
-/// Player's HUD — which is why the bar renders identically on any backend the
-/// RenderDevice rule eventually grows.
+/// This is one of only two files in the project that includes <imgui.h>, and it
+/// is the reason only an application links ImGui. It reads a ControllerModel and
+/// returns a TransportAction; it never sends an HTTP request, never touches Lua
+/// and never writes a configuration file. All of that is the executor's job
+/// (control/TransportAction.h), which is what keeps the behaviour testable with
+/// no window.
 ///
-/// There is no widget toolkit here: the buttons are rectangles hit-tested by
-/// ControllerModel, drawn by this class.
-class ControllerView {
+/// ImGui remembers nothing between frames here: the model is the only state, so
+/// the panel is a function from the model to widgets, plus whatever the operator
+/// touched.
+class ControllerPanel {
 public:
-	/// The whole bar: background, status chip, title, media corpus field,
-	/// transport row, seek bar, readouts and the message strip. The scene
-	/// clears the window first, so this draws only the bar's own furniture.
-	void draw(RenderDevice& device, const ControllerModel& model) const;
+	/// Draw the whole Controller interface for one frame. The action is `valid`
+	/// only when the operator did something that needs acting on; the caller
+	/// hands it straight to TransportExecutor.
+	struct Frame {
+		TransportAction action;
+		/// True when the operator asked to quit (Esc). The application decides
+		/// what that means.
+		bool requestQuit = false;
+	};
+
+	/// `scriptName` is what the script host reports as running, empty when
+	/// nothing is; `scriptError` is its last failure, empty when there is none.
+	Frame draw(ui::UiLayer& ui, const ControllerModel& model,
+		const std::string& scriptName, const std::string& scriptError,
+		bool scriptRunning);
+
+	/// Fraction of the per-tick budget the running script has consumed, 0..1.
+	void setScriptBudget(float fraction) { scriptBudget_ = fraction; }
+
+	/// The last line the script logged, for the Scripts strip.
+	void setScriptLog(std::string line) { scriptLog_ = std::move(line); }
+
+	/// The Player's host:port, shown in the status row so two Controllers can be
+	/// told apart at a glance.
+	void setPlayerEndpoint(std::string endpoint) { playerEndpoint_ = std::move(endpoint); }
 
 private:
-	/// Label drawn inside a button, centred by the font metric. The caller
-	/// resolves any state-dependent label (play vs pause) before calling here,
-	/// and passes the text scale it resolved from the model's DPI scale.
-	void drawButton(RenderDevice& device, const ControlButton& button,
-		float textScale) const;
+	void drawStatusRow(const ControllerModel& model);
+	void drawTransport(ControllerModel& model, Frame& frame);
+	void drawSeek(const ControllerModel& model, Frame& frame);
+	void drawReadouts(const ControllerModel& model, Frame& frame);
+	void drawCorpus(const ControllerModel& model, Frame& frame);
+	void drawMessage(const ControllerModel& model);
+	void drawScripts(const ControllerModel& model, const std::string& scriptName,
+		const std::string& scriptError, bool scriptRunning, Frame& frame);
+
+	std::string playerEndpoint_;
+	std::string scriptLog_;
+	float scriptBudget_ = 0.0f;
+
+	// The seek bar is a widget the operator drags while the Player keeps
+	// reporting a position. `seekDraft_` is the value under the operator's hand,
+	// held here for exactly as long as the drag lasts, so the incoming position
+	// cannot fight it. See drawSeek.
+	double seekDraft_ = 0.0;
+	bool seekDragging_ = false;
+
+	// Volume and speed follow the same rule for the same reason.
+	double volumeDraft_ = -1.0;
+	double speedDraft_ = -1.0;
 };
 
 } // namespace media
