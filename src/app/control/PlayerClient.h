@@ -126,6 +126,14 @@ public:
 	bool setSubtitles(bool enabled, std::string& error) override;
 	bool rescanClips(std::string& error);
 
+	/// Ask the Player to switch its media corpus folder and reload.
+	///
+	/// An empty `directory` means "back to the Player's default data folder".
+	/// The Player validates and persists the choice; this returns false, with
+	/// `error` filled in, when it refuses or cannot be reached. That distinction
+	/// is what lets the caller decide whether to write mediaplayer.ini itself.
+	bool setMediaFolder(const std::string& directory, std::string& error);
+
 	const std::string& host() const { return client_.host(); }
 	int port() const { return client_.port(); }
 
@@ -134,6 +142,9 @@ private:
 	/// Shared tail of every command: post, check ok, adopt the returned status.
 	bool postAndAdopt(const std::string& path, const HttpJsonClient::Json& body,
 		const char* what, std::string& error);
+	/// Adopt a reply that carries the status fields at the top level (the
+	/// corpus routes), rather than nested under `status`.
+	void adoptCorpusReply(const HttpJsonClient::Json& reply);
 
 	HttpJsonClient client_;
 	std::thread thread_;

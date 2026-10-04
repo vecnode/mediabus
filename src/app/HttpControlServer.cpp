@@ -1,6 +1,7 @@
 #include "app/HttpControlServer.h"
 
 #include "app/http/CommandQueue.h"
+#include "core/AppConfig.h"
 #include "core/Log.h"
 #include "core/Platform.h"
 #include "media/IClipSource.h"
@@ -73,6 +74,12 @@ bool isInsideDirectory(const std::filesystem::path& candidate,
 
 Json statusJson(const MediaPlayerStatus& status,
 	const PresentationHooks& hooks) {
+	// The media folder is read through the same host closure as the window
+	// state: main.cpp owns the render loop and the library, and this layer must
+	// not reach for either directly. Unset means "this host has no library to
+	// report", which the tests use, and which is reported as an empty string.
+	const std::string mediaFolder =
+		hooks.getMediaFolder ? hooks.getMediaFolder() : std::string();
 	return Json{
 		// frozen contract
 		{"loaded", status.loaded},
@@ -92,6 +99,11 @@ Json statusJson(const MediaPlayerStatus& status,
 		{"paused", status.paused},
 		{"decoder", status.decoder},
 		{"scriptsLoaded", status.scriptsLoaded},
+		// additive: where the playlist came from. The Controller draws this in
+		// its corpus rectangle, and the Dashboard checks it against the setting
+		// in mediaplayer.ini, so both read it from the one process that owns
+		// the library rather than from their own possibly-stale config copy.
+		{"mediaFolder", mediaFolder},
 		// additive: presentation the host owns. Reported as null when the host
 		// has no window (the test harness), so a client can tell "hidden" from
 		// "not applicable".
@@ -255,6 +267,9 @@ bool HttpControlServer::start(int port) {
 	auto parseBody = [](const httplib::Request& req, httplib::Response& res, Json& out) {
 		out = Json::parse(req.body, nullptr, false);
 		if (out.is_discarded()) {
+			LOG_WARN("HttpControlServer") << "unparseable body on " << req.path
+				<< " (" << req.body.size() << " byte(s), content-type '"
+				<< req.get_header_value("Content-Type") << "')";
 			res.status = 400;
 			res.set_content(errorJson("expected JSON body").dump(), "application/json");
 			return false;
@@ -518,14 +533,87 @@ bool HttpControlServer::start(int port) {
 	server->Post("/api/clips/rescan", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		dispatch(res, [](MediaPlayerController& c) -> Json {
-			auto* library = dynamic_cast<MediaClipLibrary*>(&c.clipSource());
+			const auto* library = dynamic_cast<const MediaClipLibrary*>(&c.clipSource());
 			if (library == nullptr) {
 				return errorJson("clip source does not support rescan");
 			}
-			library->scan();
+			const std::size_t count = c.rescan();
 			return Json{{"ok", true},
-				{"clipCount", library->size()},
+				{"clipCount", count},
+				{"mediaFolder", c.mediaFolder()},
 				{"searchLog", library->searchLog()}};
+		});
+	});
+
+	// ---- media corpus folder --------------------------------------------
+	// The folder the playlist is read from. GET is what the Controller draws in
+	// its corpus rectangle; POST re-points the library and reloads.
+	//
+	// There is deliberately NO containment check here, unlike /api/clips/{path}
+	// below: choosing the corpus is an operator decision made through a folder
+	// picker on their own machine, and it is meaningless to restrict it to one
+	// directory. The guard that matters is the one already on every route - the
+	// server binds to 127.0.0.1 and refuses any non-loopback client, so this is
+	// not a remotely reachable "read any folder" primitive.
+	//
+	// The Player is the single writer of the setting: it persists the choice to
+	// mediaplayer.ini so it survives the next start, whether the request came
+	// from the Controller's picker or from curl.
+	server->Get("/api/media-dir", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
+		if (!guard(req, res)) return;
+		dispatch(res, [](MediaPlayerController& c) -> Json {
+			return Json{{"ok", true},
+				{"mediaFolder", c.mediaFolder()},
+				{"clipCount", c.getClips().size()}};
+		});
+	});
+
+	server->Post("/api/media-dir", [this, guard, dispatch, parseBody](const httplib::Request& req, httplib::Response& res) {
+		if (!guard(req, res)) return;
+		Json body;
+		if (!parseBody(req, res, body)) return;
+		if (!body.contains("path") || !body["path"].is_string()) {
+			res.status = 400;
+			res.set_content(errorJson("expected {\"path\": \"<folder>\"}").dump(),
+				"application/json");
+			return;
+		}
+		std::string requested = body["path"].get<std::string>();
+
+		std::error_code ec;
+		if (!requested.empty()) {
+			// Tolerate forward slashes from a hand-written request; the library
+			// compares and reports preferred separators itself.
+			requested = std::filesystem::path(requested).make_preferred().string();
+			if (!std::filesystem::is_directory(requested, ec)) {
+				res.status = 400;
+				res.set_content(errorJson("not a folder: " + requested).dump(),
+					"application/json");
+				return;
+			}
+		}
+
+		dispatch(res, [this, requested](MediaPlayerController& c) -> Json {
+			const std::size_t count = c.setMediaFolder(requested);
+			const std::string actual = c.mediaFolder();
+
+			// Persist so the choice survives a restart. A failed write is
+			// reported but does not undo the change: the playlist has already
+			// moved, and pretending otherwise would be worse than a warning.
+			config::Config stored;
+			config::load(stored);
+			stored.mediaFolder = actual;
+			const bool persisted = config::save(stored);
+
+			Json payload = okWithStatus(c, impl_->hooks);
+			payload["clipCount"] = count;
+			payload["mediaFolder"] = actual;
+			payload["persisted"] = persisted;
+			if (!persisted) {
+				payload["warning"] = "folder changed, but " + config::configPath()
+					+ " could not be written; it will not survive a restart";
+			}
+			return payload;
 		});
 	});
 

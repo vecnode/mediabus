@@ -143,6 +143,26 @@ public:
 	/// The playlist source, for callers that own it (e.g. rescanning on demand).
 	IClipSource& clipSource() const { return clips_; }
 
+	/// Re-scan the current clip source in place, keeping the folder the library
+	/// was already pointed at. Returns the number of clips found.
+	std::size_t rescan();
+
+	/// Point the library at `directory` and reload. Returns the number of clips
+	/// found there.
+	///
+	/// An empty `directory` means "back to the library's own default", i.e. the
+	/// Player's data folder. A folder that does not exist is not an error: it
+	/// scans to nothing, the playlist is cleared below, and the Player keeps
+	/// running with 0 clips - the state the Controller reports as NO CLIPS.
+	///
+	/// Only meaningful when the clip source is a MediaClipLibrary; any other
+	/// source keeps its existing root and is merely rescanned. That keeps the
+	/// interface honest for the test double without a dynamic cast here.
+	std::size_t setMediaFolder(const std::string& directory);
+
+	/// Where media is being read from, for status and diagnostics.
+	std::string mediaFolder() const;
+
 	/// Diagnostics: where the playlist came from.
 	std::string searchLog() const;
 
@@ -151,6 +171,10 @@ public:
 private:
 	std::size_t clipCount() const;
 	void notifyClipChanged();
+	/// Re-open the first clip after the library changed underneath us, or clear
+	/// the loaded state when the library is now empty. Shared by rescan() and
+	/// setMediaFolder() so the two cannot disagree about what "no clips" means.
+	void reloadAfterLibraryChange();
 	/// Subtitle text for the current clip: an explicit override wins, otherwise
 	/// the backend/embedded track is reported.
 	void syncSubtitleText();

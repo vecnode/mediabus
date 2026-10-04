@@ -23,11 +23,13 @@ runtime dependency to a bundle that includes the Player; CMake refuses to
 configure the Controller without it and says so. All three must be built
 together: the Dashboard locates the other two **by name in its own directory**.
 
-On a machine with only Windows PowerShell 5.1, `powershell -File build.ps1` is
-equivalent to the `pwsh` form used below — the scripts use no PowerShell 7
-feature. There is also `build.bat` on the root, which builds everything and
-picks whichever PowerShell exists; it calls `build.ps1` and adds nothing of its
-own.
+On a machine with only Windows PowerShell 5.1, `powershell -File
+scripts/build.ps1` is equivalent to the `pwsh` form used below — the scripts use
+no PowerShell 7 feature. There is also `scripts/build.bat` next to it, which
+builds everything and picks whichever PowerShell exists; it calls `build.ps1` and
+adds nothing of its own. All the entry points live in `scripts/`; `build.ps1`
+resolves the repository root as its own parent directory, so it can be invoked
+from anywhere.
 
 ## 1. `PATH` must be confined to MSYS2 (silent-failure trap)
 

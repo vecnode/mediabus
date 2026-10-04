@@ -66,8 +66,10 @@ target_include_directories(third_party INTERFACE ${CMAKE_SOURCE_DIR}/third_party
 # Kept as a library so tests can link it without a GL context.
 # ---------------------------------------------------------------------------
 add_library(media_core STATIC
+    src/core/AppConfig.cpp
     src/core/Log.cpp
     src/core/Platform.cpp
+    src/core/UiScale.cpp
     src/media/MediaClipLibrary.cpp
     src/media/MediaPlayerController.cpp
     src/media/ScriptHost.cpp
@@ -111,6 +113,15 @@ set(MEDIA_RENDER_SOURCES
     src/app/render/RenderDevice.cpp
     src/app/render/GlRenderDevice.cpp
     src/app/hud/BitmapFont.cpp
+    src/app/hud/UiScaleGlfw.cpp
+)
+
+# The "choose the media corpus folder" dialog. Only the two applications that
+# offer a picker compile this: the Player receives the folder over HTTP and has
+# no reason to own a shell dialog, so it does not carry the code or the
+# shell32 dependency.
+set(MEDIA_FOLDER_PICKER_SOURCE
+    src/app/hud/FolderPicker.cpp
 )
 
 # Lua 5.1 is the same Lua mpv ships, so libmpv's runtime closure already
@@ -182,6 +193,7 @@ if(MEDIA_BUILD_CONTROLLER)
     add_executable(media-controller-cpp
         src/controller_main.cpp
         ${MEDIA_RENDER_SOURCES}
+        ${MEDIA_FOLDER_PICKER_SOURCE}
         src/app/control/ControllerModel.cpp
         src/app/control/ControllerView.cpp
         src/app/control/LuaControllerScript.cpp
@@ -198,7 +210,9 @@ if(MEDIA_BUILD_CONTROLLER)
         OpenGL::GL
     )
     if(WIN32)
-        target_link_libraries(media-controller-cpp PRIVATE gdi32 ole32 uuid)
+        # shell32: the folder picker (app/hud/FolderPicker.cpp) uses the shell's
+        # IFileOpenDialog. ole32 for COM, as the other two targets already do.
+        target_link_libraries(media-controller-cpp PRIVATE gdi32 ole32 uuid shell32)
     endif()
 
     # Same treatment as the Player's reference script: the source of truth is
@@ -228,6 +242,7 @@ if(MEDIA_BUILD_DASHBOARD)
     add_executable(media-dashboard-cpp
         src/dashboard_main.cpp
         ${MEDIA_RENDER_SOURCES}
+        ${MEDIA_FOLDER_PICKER_SOURCE}
         src/app/dashboard/AppLauncher.cpp
         src/app/dashboard/DashboardModel.cpp
         src/app/dashboard/DashboardView.cpp
@@ -249,7 +264,8 @@ if(MEDIA_BUILD_DASHBOARD)
         OpenGL::GL
     )
     if(WIN32)
-        # The launcher lives in the notification area, so it needs Shell_NotifyIcon.
+        # The launcher lives in the notification area, so it needs
+        # Shell_NotifyIcon; shell32 is also what the media folder picker uses.
         target_link_libraries(media-dashboard-cpp PRIVATE gdi32 ole32 uuid shell32)
     endif()
 endif()

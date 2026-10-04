@@ -49,6 +49,18 @@ ControllerState parseStatus(const Json& status) {
 	readIf(status, "subtitlesEnabled", state.subtitlesEnabled);
 	readIf(status, "hudVisible", state.hudVisible);
 	readIf(status, "fullscreen", state.fullscreen);
+	// Where the playlist is being read from. The Controller draws this, and the
+	// Dashboard compares it against the setting in mediaplayer.ini, so it comes
+	// from the Player rather than from either client's own config copy.
+	readIf(status, "mediaFolder", state.mediaFolder);
+	// How many clips that folder holds. clipCount is the same number today, but
+	// it is the *playlist* count, which could legitimately drift from the
+	// corpus on disk; the corpus field means the latter.
+	readIf(status, "corpusClipCount", state.corpusClipCount);
+	if (state.corpusClipCount == 0) {
+		state.corpusClipCount = static_cast<std::size_t>(
+			state.clipCount > 0 ? state.clipCount : 0);
+	}
 
 	// clipIndex is triply awkward: it is unsigned in the contract, but a
 	// negative value must not wrap around into a huge playlist position.
@@ -215,15 +227,18 @@ void PlayerClient::pollOnce() {
 	const ControllerState parsed = parseStatus(statusObject(reply));
 
 	// The playlist is a larger payload than the status poll, so fetch it only
-	// when the clip count disagrees with what is cached.
+	// when the clip count disagrees with what is cached. A disagreement in
+	// either direction counts: a folder change that leaves 0 clips must clear
+	// the cached list, or the Controller would keep reporting the previous
+	// folder's clips.
 	std::vector<PlayerClipInfo> clips;
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
-		if (static_cast<std::size_t>(parsed.clipCount) != playlist_.size()) {
+		if (parsed.clipCount != playlist_.size()) {
 			clips = playlist_;
 		}
 	}
-	if (clips.empty() && parsed.clipCount > 0) {
+	if (parsed.clipCount != clips.size()) {
 		Json list;
 		std::string listError;
 		if (client_.get("/api/clips", list, listError) && list.is_array()) {
@@ -241,9 +256,9 @@ void PlayerClient::pollOnce() {
 
 	std::lock_guard<std::mutex> lock(mutex_);
 	snapshot_ = parsed;
-	if (!clips.empty()) {
-		playlist_ = std::move(clips);
-	}
+	// Always adopt, including an empty list: see above. This assignment is what
+	// makes "0 clips" mean 0 clips rather than "unchanged".
+	playlist_ = std::move(clips);
 }
 
 bool PlayerClient::postAndAdopt(const std::string& path, const Json& body,
@@ -311,7 +326,41 @@ bool PlayerClient::setSubtitles(bool enabled, std::string& error) {
 
 bool PlayerClient::rescanClips(std::string& error) {
 	Json reply;
-	return client_.post("/api/clips/rescan", Json::object(), reply, error);
+	if (!client_.post("/api/clips/rescan", Json::object(), reply, error)) {
+		return false;
+	}
+	if (refused(reply, error)) {
+		return false;
+	}
+	// Adopt the reply itself, not its `status` object: this route answers at
+	// the top level, and its mediaFolder/clipCount are exactly what the corpus
+	// field needs to redraw with.
+	adoptCorpusReply(reply);
+	return true;
+}
+
+bool PlayerClient::setMediaFolder(const std::string& directory, std::string& error) {
+	Json reply;
+	if (!client_.post("/api/media-dir", Json{{"path", directory}}, reply, error)) {
+		return false;
+	}
+	if (refused(reply, error)) {
+		return false;
+	}
+	adoptCorpusReply(reply);
+	LOG_NOTICE("PlayerClient") << "media folder set to "
+		<< (directory.empty() ? std::string("(default)") : directory);
+	return true;
+}
+
+void PlayerClient::adoptCorpusReply(const Json& reply) {
+	// parseStatus on the reply object works because the corpus routes return a
+	// superset: every status key plus mediaFolder. statusObject() would unwrap
+	// to a status object that lacks mediaFolder on /api/media-dir, which is why
+	// this is a separate path.
+	const ControllerState parsed = parseStatus(statusObject(reply));
+	std::lock_guard<std::mutex> lock(mutex_);
+	snapshot_ = parsed;
 }
 
 } // namespace media

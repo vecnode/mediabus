@@ -90,3 +90,9 @@ bin/verify-live/
 # Scratch media directory created by tests/test_main.cpp (removed on teardown;
 # ignored as a safety net so a crashed test binary cannot dirty the tree)
 bin/tests-tmp-*/
+
+# The shared settings file (media corpus folder, text scale). Written at runtime
+# by the Dashboard, the Controller and the Player; it is per-machine state, not
+# a source file, so it is never tracked - the defaults are built in.
+bin/mediaplayer.ini
+mediaplayer.ini

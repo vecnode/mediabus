@@ -28,6 +28,9 @@ struct PresentationHooks {
 	std::function<bool()> getFullscreen;
 	/// Set fullscreen state. Returns false when the host refused.
 	std::function<bool(bool)> setFullscreen;
+	/// The folder the playlist is being read from, for /api/status. Empty when
+	/// the host has no library (the tests), which reads as "the default".
+	std::function<std::string()> getMediaFolder;
 };
 
 /// Localhost-only JSON control API.

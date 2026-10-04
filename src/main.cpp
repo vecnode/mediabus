@@ -10,10 +10,13 @@
 
 #include "app/HttpControlServer.h"
 #include "app/hud/BitmapFont.h"
+#include "app/hud/UiScaleGlfw.h"
 #include "app/render/RenderDevice.h"
 #include "backends/mpv/MPVSurface.h"
+#include "core/AppConfig.h"
 #include "core/Log.h"
 #include "core/Platform.h"
+#include "core/UiScale.h"
 #include "media/MediaClipLibrary.h"
 #include "media/MediaPlayerController.h"
 
@@ -174,14 +177,21 @@ media::Rect widthFitRect(float mediaW, float mediaH, float viewW, float viewH) {
 	return {(viewW - fullW) * 0.5f, 0.0f, fullW, viewH};
 }
 
-void logStartup(const media::RenderDevice& device, const media::HttpControlServer& server) {
+void logStartup(const media::RenderDevice& device, const media::HttpControlServer& server,
+	const media::MediaClipLibrary& library, float uiScale, float hudScale,
+	float contentScale) {
 	const unsigned long api = mpv_client_api_version();
 	LOG_NOTICE("App") << "media-player-cpp";
 	LOG_NOTICE("App") << "  render backend : " << device.backendName();
 	LOG_NOTICE("App") << "  GL version     : " << (const char*)glGetString(GL_VERSION);
 	LOG_NOTICE("App") << "  renderer       : " << (const char*)glGetString(GL_RENDERER);
 	LOG_NOTICE("App") << "  libmpv client  : " << (api >> 16) << "." << (api & 0xFFFF);
-	LOG_NOTICE("App") << "  data root      : " << media::platform::dataDirectory();
+	LOG_NOTICE("App") << "  media folder   : " << library.root();
+	LOG_NOTICE("App") << "  media found    : " << library.size() << " clip(s)";
+	LOG_NOTICE("App") << "  config file    : " << media::config::configPath();
+	LOG_NOTICE("App") << "  text scale     : "
+		<< media::ui::describeDecision(uiScale, contentScale)
+		<< " -> HUD " << media::ui::describe(hudScale);
 	LOG_NOTICE("App") << "  control API    : "
 		<< (server.isRunning() ? "listening on 127.0.0.1:" + std::to_string(server.port())
 			: std::string("DISABLED"));
@@ -209,6 +219,21 @@ int main(int argc, char** argv) {
 		LOG_ERROR("App") << "glfwInit failed";
 		return 1;
 	}
+
+	// How big text is drawn. The bitmap font is a fixed 5x7 atlas, so "font
+	// size" here is a multiplier on that cell. It comes from the monitor's
+	// content scale (what the Windows DPI setting reports) through the shared
+	// helper, and is floored by ui::*Pixels so a 4K display at 100% scaling is
+	// still readable - plain DPI multiplication would leave that case exactly
+	// as unreadable as it is today.
+	media::config::Config config;
+	media::config::load(config);
+
+	// mediaplayer.ini also carries the folder chosen in the Dashboard or the
+	// Controller, read further down before the first scan.
+	const float contentScale = media::ui::rawContentScale();
+	const float uiScale = media::ui::scaleForWindow(config);
+	const float hudTextScale = media::ui::textScale(uiScale, 22.0f);
 
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -263,6 +288,13 @@ int main(int argc, char** argv) {
 	// surface directly would leave the controller unable to report what is on
 	// disk.
 	media::MediaClipLibrary library;
+	// The corpus folder is whatever the Dashboard (or a previous Controller
+	// session) last chose. Empty means "the default": <exeDir>/data, which is
+	// what a fresh clone has. A configured folder that no longer exists is not
+	// fatal - scan() logs it, find 0 clips, and the Player runs anyway.
+	if (!config.mediaFolder.empty()) {
+		library.setRoot(config.mediaFolder);
+	}
 	library.scan();
 
 	media::MediaPlayerController controller(library, &surface);
@@ -293,6 +325,10 @@ int main(int argc, char** argv) {
 			presentation.windowedWidth, presentation.windowedHeight);
 		return true;
 	};
+	// Read by /api/status as "mediaFolder". Reading through the controller
+	// rather than a cached copy means the value the Controller displays is
+	// always the folder the decoder is actually pointed at.
+	hooks.getMediaFolder = [&controller] { return controller.mediaFolder(); };
 
 	media::HttpControlServer server(controller, hooks);
 	if (!server.start(options.port)) {
@@ -306,7 +342,7 @@ int main(int argc, char** argv) {
 		applyFullscreen(gWindow, presentation, true,
 			presentation.windowedWidth, presentation.windowedHeight);
 	}
-	logStartup(*device, server);
+	logStartup(*device, server, library, uiScale, hudTextScale, contentScale);
 
 	while (glfwWindowShouldClose(gWindow) == GLFW_FALSE) {
 		glfwPollEvents();
@@ -346,9 +382,11 @@ int main(int argc, char** argv) {
 		// key brings it back.
 		if (presentation.hudVisible) {
 			const float pad = 18.0f;
-			const float scale = 3.0f;
+			// DPI-derived with a floor, so the overlay is readable on a 4K
+			// panel instead of a 7-pixel capital.
+			const float scale = hudTextScale;
 			const float lineHeight = (media::hud::kGlyphHeight + 4) * scale;
-			const float panelH = lineHeight * 4.0f + pad;
+			const float panelH = lineHeight * 5.0f + pad;
 			device->drawSolid({0.0f, 0.0f, vw, panelH}, 0x00, 0x00, 0x00, 0x8C);
 
 			char line[320];
@@ -357,8 +395,19 @@ int main(int argc, char** argv) {
 			std::snprintf(line, sizeof(line), "CLIP %d/%d  %s",
 				static_cast<int>(status.loaded ? status.clipIndex + 1 : 0),
 				static_cast<int>(status.clipCount),
-				status.clipName.empty() ? "(none)" : status.clipName.c_str());
+				status.clipName.empty()
+					? (status.clipCount == 0 ? "(no clips)" : "(none)")
+					: status.clipName.c_str());
 			device->drawText(line, pad, y, scale, 0xFF, 0xFF, 0xFF);
+			y += lineHeight;
+
+			// Which folder the playlist came from. Without this, "0 clips" is
+			// indistinguishable from "the folder moved", which is the single
+			// most useful thing to know when the screen is empty.
+			const std::string& folder = controller.mediaFolder();
+			std::snprintf(line, sizeof(line), "DIR %s",
+				folder.empty() ? "(default)" : folder.c_str());
+			device->drawText(line, pad, y, scale, 0x86, 0x96, 0xA8);
 			y += lineHeight;
 
 			std::snprintf(line, sizeof(line), "STATE %s%s",

@@ -5,7 +5,7 @@ rem
 rem A thin wrapper: the real work is in build.ps1, which is where the MSYS2 PATH
 rem confinement, the libmpv prerequisite and the runtime-DLL staging live (see
 rem BUILDING.md). This exists so "build everything" has one obvious entry point
-rem next to run.bat, and so a double-click in Explorer works.
+rem next to the four run*.bat wrappers, and so a double-click in Explorer works.
 rem
 rem It builds all three applications plus the test binary:
 rem
@@ -45,5 +45,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo Build finished. Start the launcher with:  run.bat
+echo Build finished. Start the launcher with:  scripts\run.bat
 exit /b 0

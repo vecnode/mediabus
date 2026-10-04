@@ -1,6 +1,7 @@
 #include "media/MediaPlayerController.h"
 
 #include "core/Log.h"
+#include "media/MediaClipLibrary.h"
 
 #include <cmath>
 
@@ -94,6 +95,74 @@ bool MediaPlayerController::openClipAtIndex(std::size_t index) {
 		<< clips_.clipAt(index).displayName << " ("
 		<< toString(clips_.clipAt(index).mediaType) << ")";
 	return true;
+}
+
+void MediaPlayerController::reloadAfterLibraryChange() {
+	if (clipCount() == 0) {
+		// Nothing left to play. Close the decoder rather than leaving the last
+		// frame of a clip from the previous folder on screen, which would read
+		// as "still playing" while the status says 0 clips.
+		if (backend_ != nullptr) {
+			backend_->close();
+		}
+		loaded_ = false;
+		currentIndex_ = 0;
+		syncSubtitleText();
+		notifyClipChanged();
+		if (backend_ != nullptr && !scripts_.empty()) {
+			// close() may drop the decoder's script state; re-arm it so a
+			// folder change does not silently kill the scripting layer.
+			backend_->setScripts(scripts_);
+		}
+		return;
+	}
+	if (currentIndex_ >= clipCount()) {
+		currentIndex_ = 0;
+	}
+	// Always force a real open, even when the index is unchanged: the file
+	// behind it is different now, so "the index did not move" does not mean
+	// "the decoder is already showing the right thing".
+	loaded_ = false;
+	openClipAtIndex(currentIndex_);
+}
+
+std::size_t MediaPlayerController::rescan() {
+	auto* library = dynamic_cast<MediaClipLibrary*>(&clips_);
+	if (library == nullptr) {
+		// A non-disk source (a test double, a future JSON playlist) has no
+		// "scan" to ask for; report what it already holds rather than lying.
+		return clips_.size();
+	}
+	library->scan();
+	reloadAfterLibraryChange();
+	LOG_NOTICE("Controller") << "rescan: " << clips_.size() << " clip(s)";
+	return clips_.size();
+}
+
+std::size_t MediaPlayerController::setMediaFolder(const std::string& directory) {
+	auto* library = dynamic_cast<MediaClipLibrary*>(&clips_);
+	if (library == nullptr) {
+		// Nothing to re-point and nothing to scan; the caller's own source is
+		// authoritative. Reported as unchanged rather than silently ignored.
+		return clips_.size();
+	}
+	// An empty path restores the library's default root (the Player's data
+	// directory), which is what "no folder chosen" means.
+	library->setRoot(directory);
+	library->scan();
+	reloadAfterLibraryChange();
+	const std::string where = library->root();
+	LOG_NOTICE("Controller") << "media folder now "
+		<< (where.empty() ? std::string("(default)") : where)
+		<< " - " << clips_.size() << " clip(s)";
+	return clips_.size();
+}
+
+std::string MediaPlayerController::mediaFolder() const {
+	if (const auto* library = dynamic_cast<const MediaClipLibrary*>(&clips_)) {
+		return library->root();
+	}
+	return {};
 }
 
 void MediaPlayerController::play() {

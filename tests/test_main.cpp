@@ -15,7 +15,9 @@
 #include "app/control/LuaControllerScript.h"
 #include "app/control/PlayerClient.h"
 #include "app/dashboard/DashboardModel.h"
+#include "core/AppConfig.h"
 #include "core/Platform.h"
+#include "core/UiScale.h"
 #include "media/MediaClipLibrary.h"
 #include "media/MediaPlayerController.h"
 
@@ -24,6 +26,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -1578,8 +1581,425 @@ TEST(controller_state_survives_a_refused_player_reply) {
 }
 
 // ---------------------------------------------------------------------------
-int main() {
-	std::printf("media_tests\n");
+// appconfig_round_trips_the_media_folder
+//
+// The settings file is the one thing all three processes read, and the only
+// way it can fail is silently: a path that comes back different from the one
+// that went in means the Player scans a folder nobody chose. The escape rules
+// are what would break first, so they are asserted directly.
+// ---------------------------------------------------------------------------
+TEST(appconfig_round_trips_the_media_folder) {
+	media::config::Config parsed;
+	// Empty is a meaningful state ("use the Player's default"), not a missing
+	// one, so it must survive the round trip rather than being dropped.
+	media::config::parse(media::config::serialize(parsed), parsed);
+	checkEqStr(parsed.mediaFolder, "", "an unset folder stays unset");
+
+	media::config::Config written;
+	written.mediaFolder = "D:\\Media Corpus\\Shows & Films";
+	written.uiScale = 1.75f;
+	media::config::Config readBack;
+	media::config::parse(media::config::serialize(written), readBack);
+	checkEqStr(readBack.mediaFolder, written.mediaFolder,
+		"an ordinary path survives serialise + parse");
+	check(std::abs(readBack.uiScale - 1.75f) < 0.001f, "the uiScale setting survives");
+
+	// '=' is the key/value separator and '\' is the escape character: a folder
+	// containing either must not corrupt the file or truncate the path.
+	media::config::Config awkward;
+	awkward.mediaFolder = "C:\\odd=name\\back\\slash";
+	media::config::Config awkwardBack;
+	media::config::parse(media::config::serialize(awkward), awkwardBack);
+	checkEqStr(awkwardBack.mediaFolder, awkward.mediaFolder,
+		"'=' and '\\' in a path survive the round trip");
+
+	// A key this build does not know must be ignored, not treated as an error:
+	// a newer binary may have written the file.
+	media::config::Config forward;
+	forward.mediaFolder = "D:\\kept";
+	media::config::parse("someFutureKey = 12\nmediaFolder = D:\\kept\n", forward);
+	checkEqStr(forward.mediaFolder, "D:\\kept", "an unknown key does not stop the parse");
+
+	// A real file, so load()/save() are covered and not just the text helpers.
+	const std::string path = media::platform::executableDirectory()
+		+ "tests-appconfig-" + std::to_string(::GetCurrentProcessId()) + ".ini";
+	std::error_code ec;
+	std::filesystem::remove(path, ec);
+
+	media::config::Config absent;
+	check(!media::config::load(path, absent),
+		"a missing file reports false rather than failing");
+	media::config::Config target;
+	target.mediaFolder = "E:\\Corpus";
+	target.uiScale = 0.0f;
+	check(media::config::save(path, target), "save writes the file");
+	media::config::Config fromDisk;
+	check(media::config::load(path, fromDisk), "load reads what save wrote");
+	checkEqStr(fromDisk.mediaFolder, "E:\\Corpus", "the folder came back off disk");
+
+	std::filesystem::remove(path, ec);
+}
+
+// ---------------------------------------------------------------------------
+// ui_scale_keeps_text_readable_on_a_dense_display
+//
+// The whole reason for the scale is the 4K case, and the floor is what makes a
+// 4K panel at 100% Windows scaling readable. If the floor regresses, the text
+// goes back to being a 7-pixel capital and nothing else fails.
+// ---------------------------------------------------------------------------
+TEST(ui_scale_keeps_text_readable_on_a_dense_display) {
+	// A big scale multiplies through.
+	check(media::ui::textScale(2.0f, media::ui::kBodyPixels) >= 2.0f,
+		"a 2x monitor gets at least 2x text");
+
+	// The floor: 100% DPI must still produce a legible body line. This is the
+	// regression guard - the old build drew every one of these at scale 1.
+	check(media::ui::bodyScale(1.0f) > 1.0f,
+		"body text is larger than the raw 7px cell even at 100% DPI");
+	check(media::ui::kGlyphHeight * media::ui::bodyScale(1.0f) >= media::ui::kBodyPixels,
+		"body text meets its pixel floor");
+	check(media::ui::kGlyphHeight * media::ui::smallScale(1.0f) >= media::ui::kSmallPixels,
+		"small print meets its floor");
+	check(media::ui::buttonScale(1.0f) > media::ui::bodyScale(1.0f),
+		"transport labels are the largest of the roles");
+
+	// Rubbish in: no zeros, no negatives, no NaN, no absurdity.
+	check(media::ui::sanitizeScale(0.0f) >= 1.0f, "a zero scale is clamped up");
+	check(media::ui::sanitizeScale(-4.0f) >= 1.0f, "a negative scale is clamped up");
+	check(media::ui::sanitizeScale(100.0f) <= 4.0f, "an absurd scale is clamped down");
+	check(media::ui::fromContentScale(0.0f, 0.0f) >= 1.0f,
+		"a monitor that reports nothing still yields a usable scale");
+
+	// The ini override wins over the monitor, in both directions.
+	media::config::Config bigger;
+	bigger.uiScale = 3.0f;
+	check(media::ui::textScale(bigger.uiScale, media::ui::kBodyPixels) >= 3.0f,
+		"an explicit ini scale enlarges the text");
+	media::config::Config zero;
+	check(zero.uiScale == 0.0f, "0 means 'not set', so the DPI decision stands");
+}
+
+// ---------------------------------------------------------------------------
+// controller_corpus_panel_reports_the_folder_and_the_clip_count
+//
+// The empty state is the one the request called out: with no folder chosen and
+// nothing to play, the bar must say so plainly rather than look broken.
+// ---------------------------------------------------------------------------
+TEST(controller_corpus_panel_reports_the_folder_and_the_clip_count) {
+	media::ControllerModel model;
+	model.setUiScale(2.0f);
+
+	// Offline: there is no folder to report, and the panel says what to do
+	// instead of showing a stale path.
+	check(model.corpusValue().find("START THE PLAYER") != std::string::npos,
+		"offline, the panel asks for the player rather than naming a folder");
+	check(!model.corpusChosen(), "offline is not a chosen corpus");
+
+	media::ControllerState online;
+	online.online = true;
+	online.clipCount = 0;
+	online.corpusClipCount = 0;
+	model.applyState(online);
+
+	// The no-folder case: readable, explicit, and not an error.
+	check(!model.corpusChosen(), "the default folder is not a chosen corpus");
+	check(model.corpusValue().find("NOT SET") != std::string::npos,
+		"an unset folder is spelled out");
+	check(model.corpusValue().find("0 VIDEOS") != std::string::npos,
+		"an empty corpus reports 0 videos");
+	checkEqStr(model.titleText(), "NO CLIPS", "an empty playlist still says NO CLIPS");
+
+	media::ControllerState loaded = online;
+	loaded.loaded = true;
+	loaded.clipCount = 1;
+	loaded.corpusClipCount = 1;
+	loaded.clipIndex = 0;
+	loaded.clipName = "only.mp4";
+	loaded.mediaFolder = "D:\\Corpus\\Shows\\2026";
+	model.applyState(loaded);
+
+	check(model.corpusChosen(), "a reported folder counts as chosen");
+	check(model.corpusValue().find("1 VIDEO") != std::string::npos,
+		"a single clip is reported in the singular");
+	check(model.corpusValue().find("2026") != std::string::npos,
+		"the panel names the folder");
+
+	// The field must be clickable and must not swallow a transport click.
+	const float width = static_cast<float>(media::ControllerModel::kDefaultWidth);
+	const float height = static_cast<float>(media::ControllerModel::kDefaultHeight);
+	model.layout(width, height);
+	const media::Rect corpus = model.layout().corpusArea;
+	check(!corpus.empty(), "the corpus field is laid out when the player is up");
+	check(model.corpusHit(corpus.centreX(), corpus.centreY()),
+		"a click on the corpus field is a corpus click");
+	check(model.hitTest(corpus.centreX(), corpus.centreY()) == media::ControlCommand::None,
+		"the corpus field is not a transport button");
+	check(!model.corpusHit(corpus.x, corpus.y - 60.0f),
+		"a click above the corpus field is not a corpus click");
+	check(corpus.y + corpus.h <= height + 0.5f, "the corpus field ends inside the bar");
+
+	// The bands must not overlap at any DPI scale. This is the check that
+	// matters: the corpus field is fitted between the transport row and the
+	// seek bar, and getting the space budget wrong there draws the folder
+	// straight through the buttons without failing anything else.
+	//
+	// Each iteration is laid out at the size the application would really ask
+	// for at that scale (default size x scale), because that is the pair the
+	// window and the layout are in step at.
+	const float scales[] = {1.0f, 1.25f, 1.5f, 2.0f, 3.0f};
+	for (const float scale : scales) {
+		media::ControllerModel scaled;
+		scaled.setUiScale(scale);
+		scaled.applyState(loaded);
+		scaled.layout(static_cast<float>(media::ControllerModel::kDefaultWidth) * scale,
+			static_cast<float>(media::ControllerModel::kDefaultHeight) * scale);
+		const media::ControllerLayout& out = scaled.layout();
+		const std::string at = " at " + std::to_string(scale) + "x";
+
+		check(!out.corpusArea.empty(), "the corpus field is laid out" + at);
+		check(out.corpusArea.h >= media::ui::kGlyphHeight
+				* media::ui::textScale(scale, 15.0f),
+			"the corpus field fits its own text" + at);
+
+		float buttonsBottom = 0.0f;
+		for (const media::ControlButton& button : out.buttons) {
+			check(!out.corpusArea.hit(button.rect.centreX(), button.rect.centreY()),
+				"the corpus field does not overlap the transport row" + at);
+			buttonsBottom = std::max(buttonsBottom, button.rect.y + button.rect.h);
+			check(button.rect.y + button.rect.h <= out.corpusArea.y + 0.5f,
+				"a transport button ends above the corpus field" + at);
+		}
+		check(out.corpusArea.y + out.corpusArea.h <= out.seekBar.y + 0.5f,
+			"the corpus field ends above the seek bar" + at);
+		check(buttonsBottom > 0.0f, "the transport row has height" + at);
+		check(out.seekBar.y + out.seekBar.h
+				<= static_cast<float>(media::ControllerModel::kDefaultHeight) * scale + 0.5f,
+			"the seek bar ends inside the bar" + at);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// dashboard_corpus_panel_is_laid_out_and_keeps_its_button_inside
+// ---------------------------------------------------------------------------
+TEST(dashboard_corpus_panel_is_laid_out_and_keeps_its_button_inside) {
+	media::DashboardModel model;
+	model.setCorpus("D:\\Corpus", 0, false, "");
+	model.layout(static_cast<float>(media::DashboardModel::kDefaultWidth),
+		static_cast<float>(media::DashboardModel::kDefaultHeight));
+
+	const float windowW = static_cast<float>(media::DashboardModel::kDefaultWidth);
+	const float windowH = static_cast<float>(media::DashboardModel::kDefaultHeight);
+
+	check(!model.corpus().card.empty(), "the corpus panel has been laid out");
+	check(model.corpus().card.x >= 0.0f, "the panel starts inside the window");
+	check(model.corpus().card.x + model.corpus().card.w <= windowW + 0.5f,
+		"the panel ends inside the window");
+	check(model.corpus().card.y + model.corpus().card.h <= windowH + 0.5f,
+		"the panel ends above the bottom edge");
+	check(model.corpus().chooseButton.x >= model.corpus().card.x,
+		"CHANGE... starts inside its panel");
+	check(model.corpus().chooseButton.x + model.corpus().chooseButton.w
+			<= model.corpus().card.x + model.corpus().card.w + 0.5f,
+		"CHANGE... ends inside its panel");
+
+	// It must not collide with the application rows above it.
+	for (const media::DashboardRow& row : model.rows()) {
+		check(row.card.y + row.card.h <= model.corpus().card.y + 0.5f,
+			"the corpus panel sits below every application row");
+	}
+	check(model.corpus().card.y + model.corpus().card.h
+			<= model.messageArea().y + 0.5f,
+		"the corpus panel sits above the message line");
+
+	// The button is live whether or not anything is running: choosing the
+	// folder is exactly what you do when nothing is.
+	check(model.hitTest(model.corpus().chooseButton.centreX(),
+		model.corpus().chooseButton.centreY()) == media::DashboardAction::ChooseMediaFolder,
+		"CHANGE... offers the folder action");
+
+	// And it still works at 2.4x, which is the 4K case that motivated the panel.
+	// The window grows with the scale, exactly as dashboard_main.cpp sizes it.
+	const float bigW = windowW * 2.4f;
+	const float bigH = windowH * 2.4f;
+	model.layout(bigW, bigH, 2.4f);
+	check(model.corpus().chooseButton.x + model.corpus().chooseButton.w
+			<= model.corpus().card.x + model.corpus().card.w + 0.5f,
+		"CHANGE... stays inside its panel at 2.4x");
+	check(model.corpus().card.y + model.corpus().card.h
+			<= model.messageArea().y + 0.5f,
+		"the panel stays above the message line at 2.4x");
+	check(model.corpus().card.x + model.corpus().card.w <= bigW + 0.5f,
+		"the panel stays inside a 2.4x window");
+	check(model.corpus().card.y + model.corpus().card.h <= bigH + 0.5f,
+		"the panel ends above the bottom edge at 2.4x");
+}
+
+// ---------------------------------------------------------------------------
+// player_media_folder_route_switches_the_corpus
+//
+// The route the Controller's picker calls. It must actually re-point the
+// library - a reply that says ok while the playlist is unchanged is the exact
+// failure this is here to catch.
+// ---------------------------------------------------------------------------
+TEST(player_media_folder_route_switches_the_corpus) {
+	const int port = 18097;
+	ScopedDataDir data(true);
+	media::MediaClipLibrary library;
+	media::MediaPlayerController player(library, nullptr);
+	// Seed the playlist directly: this test is about the route, not about the
+	// startup path that reads mediaplayer.ini.
+	scanInto(library, data);
+	check(player.rescan() > 0, "the fixture folder seeded the playlist");
+
+	// IMPORTANT: the route persists the folder to mediaplayer.ini, and that file
+	// is shared state next to the binary. Point the config at a throwaway path
+	// for the duration of this test, or the player left in bin/ would come up
+	// scanning this test's temporary directory.
+	const std::string scratchConfig = media::platform::executableDirectory()
+		+ "tests-media-dir-" + std::to_string(::GetCurrentProcessId()) + ".ini";
+	media::config::setConfigPathOverride(scratchConfig);
+	// Restored on every exit path, including an exception.
+	struct ConfigGuard {
+		~ConfigGuard() { media::config::setConfigPathOverride({}); }
+	} guard;
+
+	media::HttpControlServer server(player);
+	if (!server.start(port)) {
+		check(false, "the media-folder test server must bind");
+		return;
+	}
+	media::HttpJsonClient client("127.0.0.1", port);
+
+	// A folder that does not exist is refused with a 400, and the playlist is
+	// left alone. Refusing at the HTTP level rather than answering ok:false is
+	// deliberate: the request was wrong, not the player.
+	Json reply;
+	std::string error;
+	check(!withServer(server, [&] {
+		return client.post("/api/media-dir",
+			Json{{"path", "C:\\definitely-not-here-12345"}}, reply, error);
+	}), "a missing folder is refused");
+	check(error.find("400") != std::string::npos,
+		"the refusal is reported as a bad request: " + error);
+	check(player.getClips().size() > 0, "a refused change leaves the playlist intact");
+
+	// A malformed body is a 400, not a crash and not a silent success.
+	Json bad;
+	std::string badError;
+	check(!withServer(server, [&] {
+		return client.post("/api/media-dir", Json{{"nope", 1}}, bad, badError);
+	}), "a body with no path is refused");
+
+	// Pointing at a folder with no media yields an empty corpus, not an error.
+	std::error_code ec;
+	const std::filesystem::path empty = data.root / "empty-corpus";
+	std::filesystem::create_directories(empty, ec);
+	Json emptyReply;
+	std::string emptyError;
+	check(withServer(server, [&] {
+		return client.post("/api/media-dir", Json{{"path", empty.string()}},
+			emptyReply, emptyError);
+	}), "switching to an empty folder completes");
+	check(emptyReply.contains("mediaFolder"), "the reply names the new folder");
+	checkEq(emptyReply["clipCount"].get<std::size_t>(), std::size_t{0},
+		"an empty folder reports 0 clips");
+	checkEq(player.getClips().size(), std::size_t{0},
+		"the playlist is empty after switching to an empty folder");
+	check(!player.getStatus().loaded, "nothing is loaded after the corpus emptied");
+
+	// GET reports the same thing, which is what the Controller's panel draws.
+	Json status;
+	std::string statusError;
+	check(withServer(server, [&] {
+		return client.get("/api/media-dir", status, statusError);
+	}), "GET /api/media-dir answers");
+	checkEq(status["clipCount"].get<std::size_t>(), std::size_t{0},
+		"the reported count matches the empty folder");
+
+	// Back to a folder with media: the playlist comes back.
+	Json back;
+	std::string backError;
+	check(withServer(server, [&] {
+		return client.post("/api/media-dir", Json{{"path", data.root.string()}},
+			back, backError);
+	}), "switching back completes");
+	check(back["clipCount"].get<std::size_t>() > 0,
+		"the playlist is repopulated when the folder has media");
+	check(player.getStatus().loaded, "something is loaded again");
+
+	server.stop();
+	{
+		std::error_code cleanupError;
+		std::filesystem::remove(scratchConfig, cleanupError);
+		std::filesystem::remove_all(empty, cleanupError);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// controller_client_posts_the_media_folder_to_the_players_route
+// ---------------------------------------------------------------------------
+TEST(controller_client_posts_the_media_folder_to_the_players_route) {
+	const int port = 18096;
+	httplib::Server server;
+	std::string postedPath;
+	bool sawRequest = false;
+
+	server.Get("/api/status", [](const httplib::Request&, httplib::Response& res) {
+		res.set_content(Json{{"loaded", false}, {"playing", false}, {"isImage", false},
+			{"clipIndex", 0}, {"clipCount", 0}, {"clipName", ""},
+			{"subtitlesEnabled", true}, {"subtitleText", ""},
+			{"mediaFolder", "D:/Corpus"}}.dump(), "application/json");
+	});
+	server.Post("/api/media-dir", [&](const httplib::Request& req, httplib::Response& res) {
+		const Json body = Json::parse(req.body, nullptr, false);
+		postedPath = body.is_object() && body.contains("path") && body["path"].is_string()
+			? body["path"].get<std::string>() : std::string();
+		sawRequest = true;
+		res.set_content(Json{{"ok", true}, {"mediaFolder", postedPath},
+			{"clipCount", 3}, {"loaded", false}, {"playing", false},
+			{"isImage", false}, {"clipIndex", 0}, {"clipName", ""},
+			{"subtitlesEnabled", true}, {"subtitleText", ""}}.dump(),
+			"application/json");
+	});
+
+	if (!server.bind_to_port("127.0.0.1", port)) {
+		check(false, "the media-folder client test server must bind");
+		return;
+	}
+	std::thread listener([&server] { server.listen_after_bind(); });
+
+	media::PlayerClient client("127.0.0.1", port);
+	std::string error;
+	check(client.setMediaFolder("D:\\Corpus", error),
+		"setMediaFolder reaches the player: " + error);
+	check(sawRequest, "the route was actually called");
+	checkEqStr(postedPath, "D:\\Corpus", "the chosen folder is what was posted");
+	checkEqStr(client.state().mediaFolder, "D:\\Corpus",
+		"the client adopted the folder the player confirmed");
+	checkEq(client.state().corpusClipCount, std::size_t{3},
+		"the client adopted the corpus clip count");
+
+	// An empty path is valid: it means "back to the player's default".
+	sawRequest = false;
+	error.clear();
+	check(client.setMediaFolder("", error),
+		"an empty folder means 'use the default' and is accepted: " + error);
+	checkEqStr(postedPath, "", "the empty path is passed through as empty");
+
+	// A poll adopts the mediaFolder from /api/status, which is where the
+	// Controller's panel gets it when it did not set it itself.
+	client.pollOnce();
+	checkEqStr(client.state().mediaFolder, "D:/Corpus",
+		"a status poll reports the player's folder");
+
+	server.stop();
+	if (listener.joinable()) {
+		listener.join();
+	}
+}
+
+// ---------------------------------------------------------------------------
+int main() {	std::printf("media_tests\n");
 	for (const TestCase& test : registry()) {
 		gCurrentTest = test.name;
 		const int before = gFailures;

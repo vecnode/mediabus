@@ -137,6 +137,30 @@ if ($hasTray) {
 if (-not $first.HasExited) { $first.Kill() }
 Remove-Item (Join-Path $Bin 'verify-launcher2.err') -ErrorAction SilentlyContinue
 
+# --- --no-tray: the ordinary-window escape hatch --------------------------
+# On a machine where the shell refuses Shell_NotifyIcon for good, --no-tray is
+# how a person gets a launcher they can actually use. It must be an ordinary
+# window: visible, no tray message window, and closing it exits.
+Start-Sleep -Milliseconds 500
+$noTrayLog = Join-Path $Bin 'verify-launcher-notray.err'
+Remove-Item $noTrayLog -ErrorAction SilentlyContinue
+$plain = Start-Process -FilePath $Exe -ArgumentList '--no-tray' -WorkingDirectory $Bin `
+    -PassThru -NoNewWindow -RedirectStandardError $noTrayLog
+Start-Sleep -Seconds 3
+
+$plainWindow = [LauncherProbe]::Find([uint32]$plain.Id, 'GLFW30')
+$plainTray = [LauncherProbe]::Find([uint32]$plain.Id, 'MediaPlayerAppLauncherTray')
+Check '--no-tray still makes a window' ($plainWindow -ne [IntPtr]::Zero) ''
+Check '--no-tray shows that window' ([LauncherProbe]::IsWindowVisible($plainWindow)) ''
+Check '--no-tray creates no tray window' ($plainTray -eq [IntPtr]::Zero) 'asked not to'
+Check '--no-tray says why in its log' `
+    ((Get-Content $noTrayLog -Raw -ErrorAction SilentlyContinue) -match '--no-tray') ''
+
+[void][LauncherProbe]::PostMessage($plainWindow, $WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+$plainExited = $plain.WaitForExit(8000)
+Check '--no-tray closing really exits' $plainExited ''
+if (-not $plainExited) { $plain.Kill() }
+
 Write-Host ''
 if ($failures.Count -gt 0) {
     Write-Host "FAILURES: $($failures -join ', ')"

@@ -1,6 +1,7 @@
 #include "app/control/ControllerModel.h"
 
 #include "app/hud/BitmapFont.h"
+#include "core/UiScale.h"
 
 #include <algorithm>
 #include <cmath>
@@ -9,26 +10,36 @@ namespace media {
 namespace {
 
 // --- bar geometry ---------------------------------------------------------
-// Two rows: identity on top, transport below. Every number here is in pixels,
-// and the layout is recomputed on resize, so the bar is usable from its
-// default size up.
-constexpr float kPad = 8.0f;
-constexpr float kChipHeight = 14.0f;
-constexpr float kChipWidth = 58.0f;
-constexpr float kTitleRowHeight = 18.0f;
-constexpr float kButtonHeight = 34.0f;
-constexpr float kButtonGap = 6.0f;
-constexpr float kButtonPadding = 10.0f;
-constexpr float kMinButtonWidth = 30.0f;
-constexpr float kSeekHeight = 8.0f;
-constexpr float kVolumeWidth = 54.0f;
-constexpr float kSpeedWidth = 46.0f;
-constexpr float kErrorStripHeight = 14.0f;
+// Written in *text units*, not pixels: one unit is the width of one glyph cell
+// at the current text scale, so every one of these grows with the font. That is
+// what keeps a bigger font from being packed into the same space - the bar's
+// own default size is multiplied by the same factor (see controller_main.cpp),
+// so the proportions are identical at 100% and at 200% DPI.
+//
+// Three bands, top to bottom: identity, transport, seek bar. The media corpus
+// band is fitted between the transport row and the seek bar when the window is
+// tall enough for it, and omitted rather than squeezing the transport labels
+// into a sliver when it is not.
+constexpr float kPad = 1.0f;
+constexpr float kChipHeight = 1.6f;
+constexpr float kChipWidth = 7.0f;
+constexpr float kTitleRowHeight = 2.0f;
+constexpr float kButtonHeight = 3.2f;
+constexpr float kButtonGap = 0.7f;
+constexpr float kButtonPadding = 1.4f;
+constexpr float kMinButtonWidth = 3.5f;
+constexpr float kSeekHeight = 0.7f;
+constexpr float kVolumeWidth = 8.0f;
+constexpr float kSpeedWidth = 7.0f;
+constexpr float kErrorStripHeight = 2.0f;
+constexpr float kCorpusHeight = 2.2f;
 
-/// Header text scale and transport text scale. The bitmap font is 5x7 plus a
-/// shadow; 2 is legible at 100% DPI without a magnifier, 1 for the small print.
-constexpr float kTitleScale = 1.0f;
-constexpr float kButtonScale = 2.0f;
+/// What a text scale of 1 draws for each role. These are floored by
+/// ui::*Pixels, which is what makes the bar legible on a 4K panel instead of
+/// a 5-pixel-wide capital.
+constexpr float kTitleRolePixels = 15.0f;
+constexpr float kButtonRolePixels = 22.0f;
+constexpr float kSmallRolePixels = 14.0f;
 
 /// Width a label needs at `scale`, using the font's own metric.
 float labelWidth(const std::string& text, float scale) {
@@ -51,6 +62,35 @@ const ButtonSpec kButtons[] = {
 	{ControlCommand::ToggleSubtitles, "SUB"},
 };
 
+/// True when the Player reported no usable folder. Empty is "using the
+/// Player's own default", which is a valid corpus, but the Controller has no
+/// path to show for it, so both spellings are drawn the same way.
+bool folderIsDefault(const std::string& folder) {
+	return folder.empty() || folder == "(default)";
+}
+
+/// The tail of a path, for the bar: the last component, plus its parent when
+/// that is available. A full corpus path is far longer than the bar, and the
+/// tail is what identifies the folder to a person.
+std::string shortFolder(const std::string& folder) {
+	std::string text = folder;
+	while (!text.empty() && (text.back() == '\\' || text.back() == '/')) {
+		text.pop_back();
+	}
+	const std::size_t last = text.find_last_of("\\/");
+	if (last == std::string::npos) {
+		return text;
+	}
+	const std::size_t previous = (last == 0)
+		? std::string::npos : text.find_last_of("\\/", last - 1);
+	if (previous == std::string::npos) {
+		return text;
+	}
+	// "D:\Corpus\Shows\2026" -> "Shows\2026"; the drive root stays whole.
+	const std::string tail = text.substr(previous + 1);
+	return tail.size() <= 2 ? text : tail;
+}
+
 } // namespace
 
 const char* toString(ControlCommand command) {
@@ -67,9 +107,17 @@ const char* toString(ControlCommand command) {
 	return "none";
 }
 
+void ControllerModel::setUiScale(float scale) {
+	uiScale_ = ui::sanitizeScale(scale);
+}
+
 bool ControllerModel::applyState(const ControllerState& next) {
 	// Compare the fields the bar actually draws; the position ticks up on every
 	// poll, so a naive whole-struct compare would report "changed" forever.
+	//
+	// mediaFolder and corpusClipCount are in this list because the corpus
+	// field is drawn from them: leaving them out would mean a folder change
+	// made elsewhere never repainted here.
 	const ControllerState& prev = state_;
 	const bool changed =
 		prev.online != next.online || prev.loaded != next.loaded
@@ -78,6 +126,8 @@ bool ControllerModel::applyState(const ControllerState& next) {
 		|| prev.clipIndex != next.clipIndex || prev.clipCount != next.clipCount
 		|| prev.clipName != next.clipName || prev.subtitlesEnabled != next.subtitlesEnabled
 		|| prev.hudVisible != next.hudVisible || prev.fullscreen != next.fullscreen
+		|| prev.mediaFolder != next.mediaFolder
+		|| prev.corpusClipCount != next.corpusClipCount
 		|| prev.lastError != next.lastError
 		|| std::abs(prev.duration - next.duration) > 0.001
 		|| std::abs(prev.volume - next.volume) > 0.001
@@ -100,51 +150,104 @@ void ControllerModel::setMessage(std::string message) {
 void ControllerModel::layout(float width, float height) {
 	layout_ = ControllerLayout{};
 
-	const float innerLeft = kPad;
-	const float innerRight = std::max(kPad, width - kPad);
+	// One unit is one glyph cell at this scale. Every constant above is in
+	// units, so a single multiply here makes the whole bar - not just its text -
+	// grow with the font.
+	const float unit = ui::kGlyphHeight * uiScale_;
+	auto u = [unit](float value) { return value * unit; };
+
+	const float pad = u(kPad);
+	const float gap = u(kButtonGap);
+
+	const float innerLeft = pad;
+	const float innerRight = std::max(pad, width - pad);
 	const float innerWidth = innerRight - innerLeft;
 
 	// Top row: status chip on the left, clip identity filling the rest.
-	layout_.statusChip = {innerLeft, kPad, kChipWidth, kChipHeight};
-	layout_.titleArea = {innerLeft + kChipWidth + kPad, kPad,
-		std::max(0.0f, innerWidth - kChipWidth - kPad), kTitleRowHeight};
+	layout_.statusChip = {innerLeft, pad, u(kChipWidth), u(kChipHeight)};
+	layout_.titleArea = {innerLeft + u(kChipWidth) + pad, pad,
+		std::max(0.0f, innerWidth - u(kChipWidth) - pad), u(kTitleRowHeight)};
 
-	// Bottom strip: the error line, only meaningful while offline.
-	layout_.errorStrip = {innerLeft, height - kPad - kErrorStripHeight,
-		innerWidth, kErrorStripHeight};
+	// Fixed readouts on the right of the transport row.
+	const float volumeW = u(kVolumeWidth);
+	const float speedW = u(kSpeedWidth);
+	const float readoutsW = volumeW + speedW + gap * 2.0f;
+	const float readoutWidth = std::max(0.0f, innerWidth - readoutsW);
 
-	const float secondRowTop = kPad + kTitleRowHeight;
-	const float available = std::max(0.0f, innerWidth);
-	const bool hasErrorLine = !state_.online;
-	const float buttonRowBottom = hasErrorLine
-		? layout_.errorStrip.y - kPad
-		: height - kPad;
-	const float buttonHeight = std::max(kButtonHeight,
-		buttonRowBottom - secondRowTop - kSeekHeight - kButtonGap);
+	// --- the vertical stack -------------------------------------------------
+	// Top down: the identity row, the transport row, optionally the media corpus
+	// field, then the seek bar. It is built as one block and centred in whatever
+	// space is left, so a taller window puts equal air above and below instead of
+	// leaving one band stretched and a hole under it.
+	//
+	// The corpus field is only taken when the transport row would still keep at
+	// least its natural height; otherwise the labels would be squeezed into a
+	// sliver, which is worse than not showing the folder at all.
+	const float titleHeight = u(kTitleRowHeight);
+	const float minButtonHeight = u(kButtonHeight);
+	const float corpusHeight = u(kCorpusHeight);
+	const float seekHeight = u(kSeekHeight);
 
-	// Reserve the fixed readouts on the right of the transport row.
-	const bool compact = available < 640.0f;
-	const float volumeW = compact ? 0.0f : kVolumeWidth;
-	const float speedW = compact ? 0.0f : kSpeedWidth;
+	// The error strip is where the seek bar's own reading would go, so its band
+	// is reserved only while offline (that is when the strip has text in it).
+	const float errorHeight = state_.online ? 0.0f : (u(kErrorStripHeight) + gap);
+	const float available = std::max(0.0f, height - pad * 2.0f - errorHeight);
+	const float bodySpace = std::max(0.0f, available - titleHeight - gap);
 
+	const bool roomForCorpus = bodySpace
+		>= minButtonHeight + gap + corpusHeight + gap + seekHeight;
+	const float buttonHeight = roomForCorpus
+		? std::min(minButtonHeight * 1.2f, bodySpace * 0.4f) : minButtonHeight;
+	const float stackHeight = titleHeight + gap + buttonHeight
+		+ (roomForCorpus ? gap + corpusHeight : 0.0f) + gap + seekHeight;
+
+	// Extra space becomes margin above and below the block rather than one
+	// stretched band. Never negative, so an undersized window just clips.
+	const float top = pad + std::max(0.0f, (available - stackHeight) * 0.5f);
+
+	// Top row: status chip on the left, clip identity filling the rest.
+	layout_.statusChip = {innerLeft, top, u(kChipWidth), u(kChipHeight)};
+	layout_.titleArea = {innerLeft + u(kChipWidth) + pad, top,
+		std::max(0.0f, innerWidth - u(kChipWidth) - pad), titleHeight};
+
+	float y = top + titleHeight + gap;
+	const float buttonY = y;
+	y += buttonHeight;
+	if (roomForCorpus) {
+		y += gap;
+		layout_.corpusArea = {innerLeft, y, readoutWidth, corpusHeight};
+		y += corpusHeight;
+	}
+	y += gap;
+	const float seekY = y;
+
+	// Bottom strip: the error line, only laid out while offline so it cannot
+	// overlap the seek bar when the bar is online.
+	if (!state_.online) {
+		layout_.errorStrip = {innerLeft, height - pad - u(kErrorStripHeight),
+			innerWidth, u(kErrorStripHeight)};
+	}
+
+	// Transport row: left of the readouts.
 	float buttonsLeft = innerLeft;
-	float buttonsRight = innerRight - volumeW - speedW
-		- (volumeW > 0.0f ? kButtonGap : 0.0f) - (speedW > 0.0f ? kButtonGap : 0.0f);
-	if (buttonsRight < buttonsLeft + kMinButtonWidth) {
+	float buttonsRight = innerRight - readoutsW;
+	if (buttonsRight < buttonsLeft + u(kMinButtonWidth)) {
 		buttonsRight = innerRight;
 	}
 
 	// Measure every button, then distribute any spare width evenly rather than
 	// left-packing, so the row looks deliberate at any width.
+	const float buttonScale = ui::textScale(uiScale_, kButtonRolePixels);
 	const std::size_t count = sizeof(kButtons) / sizeof(kButtons[0]);
 	float naturalTotal = 0.0f;
 	float widths[sizeof(kButtons) / sizeof(kButtons[0])];
 	for (std::size_t i = 0; i < count; ++i) {
-		const float natural = labelWidth(kButtons[i].label, kButtonScale) + kButtonPadding * 2.0f;
-		widths[i] = std::max(kMinButtonWidth, natural);
+		const float natural = labelWidth(kButtons[i].label, buttonScale)
+			+ u(kButtonPadding) * 2.0f;
+		widths[i] = std::max(u(kMinButtonWidth), natural);
 		naturalTotal += widths[i];
 	}
-	const float gaps = kButtonGap * static_cast<float>(count - 1);
+	const float gaps = gap * static_cast<float>(count - 1);
 	const float span = buttonsRight - buttonsLeft;
 	float slack = span - naturalTotal - gaps;
 	if (slack > 0.0f) {
@@ -162,7 +265,6 @@ void ControllerModel::layout(float width, float height) {
 		scaleDown = std::max(0.35f, (span - gaps) / naturalTotal);
 	}
 
-	const float buttonY = secondRowTop;
 	float x = buttonsLeft;
 	for (std::size_t i = 0; i < count; ++i) {
 		const float w = widths[i] * scaleDown;
@@ -171,18 +273,14 @@ void ControllerModel::layout(float width, float height) {
 		button.label = kButtons[i].label;
 		button.rect = {x, buttonY, w, buttonHeight};
 		layout_.buttons.push_back(button);
-		x += w + kButtonGap;
+		x += w + gap;
 	}
 
 	// Seek bar sits under the transport row, full width up to the readouts.
-	const float readoutsW = volumeW + speedW + (volumeW > 0.0f ? kButtonGap : 0.0f)
-		+ (speedW > 0.0f ? kButtonGap : 0.0f);
-	const float seekWidth = std::max(0.0f, innerWidth - readoutsW);
-	layout_.seekBar = {innerLeft, buttonY + buttonHeight + kButtonGap * 0.5f,
-		seekWidth, kSeekHeight};
+	layout_.seekBar = {innerLeft, seekY, readoutWidth, seekHeight};
 
 	if (volumeW > 0.0f) {
-		layout_.volumeArea = {innerRight - volumeW - speedW - kButtonGap,
+		layout_.volumeArea = {innerRight - volumeW - speedW - gap,
 			buttonY, volumeW, buttonHeight};
 	}
 	if (speedW > 0.0f) {
@@ -200,6 +298,10 @@ ControlCommand ControllerModel::hitTest(float x, float y) const {
 		}
 	}
 	return ControlCommand::None;
+}
+
+bool ControllerModel::corpusHit(float x, float y) const {
+	return layout_.corpusArea.hit(x, y);
 }
 
 bool ControllerModel::seekPercentAt(float x, float y, double& percentOut) const {
@@ -240,6 +342,29 @@ std::string ControllerModel::titleText() const {
 		text += "  [FS]";
 	}
 	return text;
+}
+
+bool ControllerModel::corpusChosen() const {
+	return state_.online && !folderIsDefault(state_.mediaFolder);
+}
+
+std::string ControllerModel::corpusLabel() const {
+	return "MEDIA FOLDER: ";
+}
+
+std::string ControllerModel::corpusValue() const {
+	if (!state_.online) {
+		// No Player means no folder to report. Drawing a stale one would be a
+		// lie about what is being played, so the field says what it knows.
+		return "START THE PLAYER TO SET IT";
+	}
+	const std::string count = std::to_string(state_.corpusClipCount)
+		+ (state_.corpusClipCount == 1 ? " VIDEO" : " VIDEOS");
+	if (!corpusChosen()) {
+		// The explicit "nothing chosen" state: black, zero videos, no error.
+		return "NOT SET - " + count + " - CLICK TO CHOOSE";
+	}
+	return shortFolder(state_.mediaFolder) + " - " + count;
 }
 
 } // namespace media

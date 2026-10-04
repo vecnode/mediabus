@@ -9,25 +9,39 @@ rem
 rem   right-click the tray icon  ->  Launch Player / Launch Controller / Quit
 rem   left-click the tray icon   ->  show or hide the launcher window
 rem
-rem The window starts hidden (--tray). Closing it later hides it again rather
-rem than exiting. There is one launcher per session: a second run.bat finds the
+rem The window starts hidden. Closing it later hides it again rather than
+rem exiting. There is one launcher per session: a second run.bat finds the
 rem first one and does nothing.
 rem
+rem   run.bat --show     start with the launcher window visible
+rem
 rem Build first if bin\ is empty:  build.bat
+rem
+rem The other three wrappers start one application each, without the launcher:
+rem   run-player.bat  run-controller.bat  run-dashboard.bat
 rem ---------------------------------------------------------------------------
 setlocal
+call "%~dp0_bin-dir.bat"
+if errorlevel 1 exit /b 1
 
-set "BIN=%~dp0bin"
 set "EXE=%BIN%\media-dashboard-cpp.exe"
 set "LOG=%BIN%\dashboard.log"
 
 if not exist "%EXE%" (
     echo.
     echo Not built yet: "%EXE%"
-    echo Run build.bat first.
+    echo Run scripts\build.bat first.
     echo.
     pause
     exit /b 1
+)
+
+rem --show is this script's own switch; everything else is passed to the
+rem launcher. Banner off means "stay in the tray", which is the normal case.
+set "ARGS=--tray"
+if /i "%~1"=="--show" (
+    set "ARGS="
+    shift
 )
 
 rem Start it detached, with its output in bin\dashboard.log.
@@ -37,9 +51,7 @@ rem measured reasons: `start` does not pass a redirection on to its child, so th
 rem log came out empty, and a launcher whose log is empty is undiagnosable when
 rem it refuses to appear. The launcher is a Windows subsystem binary, so no
 rem console window appears next to the tray icon either way.
-rem
-rem Extra arguments are passed through after --tray.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%EXE%' -ArgumentList '--tray %*' -WorkingDirectory '%BIN%' -RedirectStandardError '%LOG%'"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%EXE%' -ArgumentList '%ARGS% %*' -WorkingDirectory '%BIN%' -RedirectStandardError '%LOG%'"
 
 rem Confirm it actually came up. A launcher missing a runtime DLL dies before
 rem main() and prints nothing at all, which would otherwise look like nothing
@@ -49,7 +61,7 @@ tasklist /fi "imagename eq media-dashboard-cpp.exe" 2>nul | find /i "media-dashb
 if errorlevel 1 (
     echo.
     echo The launcher did not start.
-    echo Check that bin\ has been built with build.bat, then read
+    echo Check that bin\ has been built with scripts\build.bat, then read
     echo "%LOG%" - it says why.
     echo.
     pause

@@ -67,43 +67,48 @@ Three properties make this a system rather than three programs in a folder:
 
 ## Build and run
 
-On Windows, two batch files at the root are the short path:
+Everything you double-click lives in `scripts/`:
 
 | File | What it does |
 |---|---|
-| `build.bat` | builds everything: the three applications and the test binary |
-| `run.bat` | starts the launcher in the notification area — the usual entry point |
+| `scripts/build.bat` | builds everything: the three applications and the test binary |
+| `scripts/run.bat` | starts the launcher in the notification area — the usual entry point |
+| `scripts/run-player.bat` | starts **only** the Player (`:8080`) |
+| `scripts/run-controller.bat` | starts **only** the Controller bar (`:8081`) |
+| `scripts/run-dashboard.bat` | starts **only** the launcher, with its window shown |
 
-`run.bat` starts **one** process, the launcher, and everything else is started
-from its tray menu. The Player and the Controller can then be closed and
-reopened without touching the launcher.
+`scripts/run.bat` starts **one** process, the launcher, and everything else is
+started from its tray menu. The Player and the Controller can then be closed and
+reopened without touching the launcher. Add `--show` to see the launcher window
+straight away; the three `run-*.bat` wrappers are for the case where you want one
+application on its own, without the launcher involved.
 
-Underneath, both are thin wrappers over the PowerShell scripts below, so the
+Underneath, all of them are thin wrappers over the PowerShell script below, so the
 toolchain notes in [BUILDING.md](BUILDING.md) still apply and arguments pass
-straight through (`build.bat -Clean` works):
+straight through (`scripts\build.bat -Clean` works):
 
 ```powershell
 # 1. one-time: build libmpv against the ffmpeg installed on this machine
 pwsh -File tools/build-libmpv.ps1
 
 # 2. build all three applications and the test binary
-pwsh -File build.ps1
+pwsh -File scripts/build.ps1
 
 # 3. run any of them
-pwsh -File build.ps1 -Run                      # Player
-pwsh -File build.ps1 -Run -App Controller      # Controller
-pwsh -File build.ps1 -Run -App Dashboard       # the launcher
+pwsh -File scripts/build.ps1 -Run                      # Player
+pwsh -File scripts/build.ps1 -Run -App Controller      # Controller
+pwsh -File scripts/build.ps1 -Run -App Dashboard       # the launcher
 ```
 
-> On a machine with only Windows PowerShell 5.1, `powershell -File build.ps1` is
-> equivalent — the scripts use no PowerShell 7 feature. `pwsh` is simply what
-> they are written for.
+> On a machine with only Windows PowerShell 5.1, `powershell -File
+> scripts/build.ps1` is equivalent — the scripts use no PowerShell 7 feature.
+> `pwsh` is simply what they are written for.
 
-`build.ps1` fails loudly if any of the three binaries is missing afterwards: the
-Dashboard finds its neighbours **by name in its own directory**, so a partial
-build would produce a launcher whose buttons cannot work. It also stages the
-MinGW runtime DLLs into `bin/`, without which the executables only run inside an
-MSYS2 shell.
+`scripts/build.ps1` fails loudly if any of the three binaries is missing
+afterwards: the Dashboard finds its neighbours **by name in its own directory**,
+so a partial build would produce a launcher whose buttons cannot work. It also
+stages the MinGW runtime DLLs into `bin/`, without which the executables only run
+inside an MSYS2 shell.
 
 The build must run with `PATH` confined to MSYS2. With a normal `PATH`,
 `C:\Strawberry\c\bin\libwinpthread-1.dll` shadows MSYS2's and `cc1plus.exe` dies
@@ -249,7 +254,7 @@ running: it lives in the **notification area**, and the Player and the Controlle
 come and go from its menu.
 
 ```
-run.bat
+scripts\run.bat
   └─ media-dashboard-cpp.exe --tray        one process, in the tray
        ├─ Launch Player      -> media-player-cpp.exe      :8080
        └─ Launch Controller  -> media-controller-cpp.exe  :8081
@@ -260,10 +265,11 @@ run.bat
 | right-click the tray icon | Launch Player / Launch Controller / Stop Player / Stop Controller / Show-Hide Dashboard / **Quit** |
 | left-click the tray icon | show or hide the launcher window |
 | the launcher window | one row per application with its state, path and port, and a LAUNCH or STOP button |
+| the MEDIA FOLDER panel | shows the folder the Player reads and how many videos are in it; **CHANGE...** picks a new one |
 | the window's close box (or Esc) | **hides** the launcher; it does not exit |
 | QUIT in the tray menu | the only exit; it also stops the applications this launcher started |
 
-Three deliberate properties:
+Four deliberate properties:
 
 - **A Player or Controller started elsewhere is never killed from here.**
   `AppProbe::stop` only acts on a child this process created, which is also why
@@ -274,13 +280,56 @@ Three deliberate properties:
 - **No invisible processes.** If the tray icon cannot be created — a locked or
   remote session can refuse `Shell_NotifyIcon`, and this machine's session
   currently refuses it for *any* program — the launcher shows its window and
-  closing that window really exits. A launcher with no icon and no window would
-  be a process only Task Manager could reach.
+  closing that window really exits, and it says so on its status line. A launcher
+  with no icon and no window would be a process only Task Manager could reach.
+  `--no-tray` skips the icon deliberately and gives the same ordinary window, for
+  a machine where no icon will ever appear.
+- **The media folder is one setting in one place.** The Dashboard writes it,
+  the Controller's folder field writes it, the Player is told over HTTP and
+  re-points its library immediately. An empty or unset folder is a normal state:
+  the Player reports 0 clips and keeps running rather than failing.
 
 Its log goes to `bin/dashboard.log` when `run.bat` starts it, because a tray
 application has no console to print to. Launched from a console, it prints there
 as usual. Liveness comes from each application's health endpoint, polled on a
 background thread — never on the frame loop, which must not wait on a socket.
+
+### The media corpus folder
+
+Which folder the Player scans is the one piece of state all three applications
+share across runs, so it lives in a small text file next to the executables:
+**`bin/mediaplayer.ini`**. It is deliberately hand-editable:
+
+```ini
+mediaFolder = D:\Media Corpus
+uiScale = 0
+```
+
+- `mediaFolder` — what the Player scans. Empty means `<exeDir>\data`, the folder
+  a fresh clone has. A folder that does not exist is not an error: the Player
+  logs it, reports 0 clips and runs.
+- `uiScale` — an extra text-size multiplier on top of the monitor's DPI scale.
+  `0` leaves the DPI decision alone.
+
+It travels with the folder rather than living in the registry or `%APPDATA%`,
+because the point of this repository is a directory you can copy somewhere and
+run.
+
+### Text size
+
+The three windows draw text with a fixed 5×7 bitmap font, so "font size" is a
+multiplier on that cell. `core/UiScale.h` decides it, and all three use the same
+rule:
+
+```
+pixel height = glyphs * monitor DPI scale, but never below a per-role floor
+```
+
+The floor is the important half. It guarantees readable text when a monitor
+reports a scale of 1.0 — a 4K display at 100% Windows scaling, or a remote
+session — which plain DPI multiplication would leave as unreadable as the old
+build was. Body text is floored at 15 pixels and transport labels at 22, against
+the 7-pixel capital the font used to draw.
 
 ## Scripting
 
@@ -357,8 +406,14 @@ without needing a window.
 ## Repository layout
 
 ```
-run.bat                       start the launcher in the notification area
-build.bat                     build everything on Windows
+scripts/run.bat               start the launcher in the notification area
+scripts/run-player.bat        start only the Player
+scripts/run-controller.bat    start only the Controller
+scripts/run-dashboard.bat     start only the launcher, window shown
+scripts/build.bat             build everything on Windows
+scripts/build.ps1             the build itself (PATH confinement, DLL staging)
+scripts/media-player.lua      reference Player script, installed into bin/data
+scripts/controller-example.lua reference Controller script, installed likewise
 src/main.cpp                  Player: window, frame loop, wiring
 src/controller_main.cpp       Controller: bar window, input, Lua host wiring
 src/dashboard_main.cpp        Launcher: window, tray, probe thread, frame loop
@@ -367,9 +422,9 @@ src/app/control/              Controller: model, view, PlayerClient, Lua host, i
 src/app/dashboard/            Launcher: model, view, AppProbe, TrayIcon
 src/app/http/                 shared HTTP/JSON client and the submit-and-poll queue
 src/app/render/               RenderDevice + the one OpenGL implementation
-src/app/hud/                  bitmap font for the HUD and the bars
+src/app/hud/                  bitmap font, DPI scale, the native folder picker
 src/backends/mpv/             MPVSurface: the only file that attaches mpv to GL
-src/core/                     logging, platform paths
+src/core/                     logging, platform paths, UiScale, AppConfig
 src/media/                    playlist, playback controller, script discovery
 tests/                        the headless suite
 tools/                        build, package, soak, stress and verify scripts

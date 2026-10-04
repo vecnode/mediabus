@@ -19,15 +19,17 @@ class RenderDevice;
 /// ControllerModel, drawn by this class.
 class ControllerView {
 public:
-	/// The whole bar: background, status chip, title, transport row, seek bar,
-	/// readouts and the message strip. The scene clears the window first, so
-	/// this draws only the bar's own furniture.
+	/// The whole bar: background, status chip, title, media corpus field,
+	/// transport row, seek bar, readouts and the message strip. The scene
+	/// clears the window first, so this draws only the bar's own furniture.
 	void draw(RenderDevice& device, const ControllerModel& model) const;
 
 private:
 	/// Label drawn inside a button, centred by the font metric. The caller
-	/// resolves any state-dependent label (play vs pause) before calling here.
-	void drawButton(RenderDevice& device, const ControlButton& button) const;
+	/// resolves any state-dependent label (play vs pause) before calling here,
+	/// and passes the text scale it resolved from the model's DPI scale.
+	void drawButton(RenderDevice& device, const ControlButton& button,
+		float textScale) const;
 };
 
 } // namespace media

@@ -1,5 +1,10 @@
 # build.ps1 — configure and build the application.
 #
+# Lives in scripts/ with the other entry points; the repository root is this
+# file's parent directory. Invoke it as:
+#     pwsh -File scripts/build.ps1
+# or double-click scripts\build.bat, which finds PowerShell for you.
+#
 # PATH is REPLACED, not extended. With the user's normal PATH,
 # C:\Strawberry\c\bin\libwinpthread-1.dll shadows MSYS2's and cc1plus.exe dies
 # with STATUS_ENTRYPOINT_NOT_FOUND printing nothing at all. See BUILDING.md.
@@ -28,7 +33,9 @@ Remove-Item Env:MINGW_PREFIX -ErrorAction SilentlyContinue
 $env:CC  = 'gcc'
 $env:CXX = 'g++'
 
-$Repo = $PSScriptRoot
+# This script lives in scripts/, so the repository root is its parent. Every
+# path below is derived from $Repo, never from the caller's working directory.
+$Repo = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $Repo 'build'
 
 # The three applications this tree produces. They must all exist after a build:

@@ -19,9 +19,13 @@
 #include "app/control/LuaControllerScript.h"
 #include "app/control/PlayerClient.h"
 #include "app/hud/BitmapFont.h"
+#include "app/hud/FolderPicker.h"
+#include "app/hud/UiScaleGlfw.h"
 #include "app/render/RenderDevice.h"
+#include "core/AppConfig.h"
 #include "core/Log.h"
 #include "core/Platform.h"
+#include "core/UiScale.h"
 
 #define GLFW_INCLUDE_NONE
 #include <GL/glew.h>       // loader must precede GLFW so GLFW does not pull in GL
@@ -32,6 +36,7 @@
 #include <GLFW/glfw3native.h>
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -67,8 +72,8 @@ void printUsage() {
 		"\n"
 		"Usage: media-controller-cpp.exe [options]\n"
 		"\n"
-		"  --width N            bar width  (default %d)\n"
-		"  --height N           bar height (default %d)\n"
+		"  --width N            bar width  (default %d, times the monitor DPI scale)\n"
+		"  --height N           bar height (default %d, times the monitor DPI scale)\n"
 		"  --player-host HOST   where the Player API is (default 127.0.0.1)\n"
 		"  --player-port N      Player API port (default %d)\n"
 		"  --api-port N         this Controller's own API port (default %d)\n"
@@ -78,6 +83,8 @@ void printUsage() {
 		"\n"
 		"Keys:  H hide/show the Player HUD   F toggle Player fullscreen\n"
 		"       S subtitles   Space play/pause   R reload script   Esc quit\n"
+		"Mouse: click the transport buttons, the seek bar, or the MEDIA FOLDER\n"
+		"       field to choose the folder the Player plays from.\n"
 		"API:   http://127.0.0.1:%d  (localhost only)\n",
 		media::ControllerModel::kDefaultWidth, media::ControllerModel::kDefaultHeight,
 		media::ControllerHttpServer::kPlayerPort, media::ControllerHttpServer::kDefaultPort,
@@ -100,8 +107,7 @@ bool parseOptions(int argc, char** argv, Options& out) {
 		if (arg == "--help" || arg == "-h") {
 			printUsage();
 			return false;
-		} else if (arg == "--width") {
-			nextInt(out.width);
+		} else if (arg == "--width") {			nextInt(out.width);
 		} else if (arg == "--height") {
 			nextInt(out.height);
 		} else if (arg == "--player-host") {
@@ -126,12 +132,113 @@ bool parseOptions(int argc, char** argv, Options& out) {
 		}
 	}
 	if (out.width < 480) out.width = 480;
-	if (out.height < 72) out.height = 72;
+	if (out.height < 96) out.height = 96;
 	return true;
+}
+
+/// Tell Windows this process understands DPI, before any window exists.
+///
+/// Without it the process is "DPI unaware", Windows lies about the panel size
+/// (a 4K monitor reports 1920x1080), glfwGetMonitorContentScale returns 1.0,
+/// and the text is scaled up by the compositor into a blurry mess. With it,
+/// GLFW reports the real content scale and the font is drawn at real pixels.
+///
+/// Per-monitor-v2 awareness is preferred and is what GLFW asks for itself; the
+/// older call is the documented fallback for Windows 7/8.1. Both are no-ops
+/// when GLFW got there first, which is why the result is only logged.
+void enableDpiAwareness() {
+#if defined(_WIN32)
+	typedef BOOL (WINAPI *SetAwarenessContextFn)(DPI_AWARENESS_CONTEXT);
+	if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+		auto setContext = reinterpret_cast<SetAwarenessContextFn>(
+			reinterpret_cast<void*>(GetProcAddress(user32, "SetProcessDpiAwarenessContext")));
+		if (setContext != nullptr
+			&& setContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+			return;
+		}
+	}
+	SetProcessDPIAware();
+#endif
+}
+
+/// Ask for a window whose FRAMEBUFFER is `wantW` x `wantH` physical pixels.
+///
+/// Everything that draws works in framebuffer pixels, so the layout is computed
+/// against the framebuffer size and the window has to be big enough to hold it:
+/// a 980x240 layout drawn into a 653x160 framebuffer is clipped, which is
+/// exactly what a bar laid out for the wrong size looks like.
+///
+/// So the requested size is the layout size times the content scale. That is
+/// also what makes the bar physically bigger on a 4K display rather than merely
+/// denser, which is the point of scaling the text at all.
+///
+/// This verifies the result instead of assuming it. GLFW does not promise that a
+/// requested window size and the framebuffer it produces are the same number on
+/// every platform and DPI setting, and a mismatch here is otherwise invisible
+/// inside the application.
+bool syncWindowToFramebuffer(GLFWwindow* window, int wantW, int wantH) {
+	int fbW = 0;
+	int fbH = 0;
+	glfwGetFramebufferSize(window, &fbW, &fbH);
+	if (fbW == wantW && fbH == wantH) {
+		return true;
+	}
+	int winW = 0;
+	int winH = 0;
+	glfwGetWindowSize(window, &winW, &winH);
+	if (fbW <= 0 || fbH <= 0 || winW <= 0 || winH <= 0) {
+		LOG_WARN("Controller") << "no usable window or framebuffer size; "
+			"laying out for " << fbW << "x" << fbH;
+		return false;
+	}
+
+	// The relationship between the two is linear, so one correction lands on
+	// the target. Asking for the ratio of the desired framebuffer to the one we
+	// got is the same correction whatever is doing the scaling.
+	const int targetW = std::max(1, static_cast<int>(
+		static_cast<float>(winW) * (static_cast<float>(wantW) / static_cast<float>(fbW)) + 0.5f));
+	const int targetH = std::max(1, static_cast<int>(
+		static_cast<float>(winH) * (static_cast<float>(wantH) / static_cast<float>(fbH)) + 0.5f));
+	glfwSetWindowSize(window, targetW, targetH);
+	glfwGetFramebufferSize(window, &fbW, &fbH);
+	if (fbW == wantW && fbH == wantH) {
+		LOG_NOTICE("Controller") << "window resized to " << targetW << "x" << targetH
+			<< " to get a " << fbW << "x" << fbH << " framebuffer";
+		return true;
+	}
+	// Not fatal - the layout adapts to whatever it is given - but it means the
+	// display is doing something this code did not anticipate, so say so.
+	LOG_WARN("Controller") << "framebuffer is " << fbW << "x" << fbH
+		<< ", not the requested " << wantW << "x" << wantH
+		<< "; the bar will be laid out for the size it really has";
+	return false;
 }
 
 void onGlfwError(int code, const char* description) {
 	LOG_ERROR("GLFW") << code << ": " << description;
+}
+
+/// Physical size of the window on screen, in real device pixels.
+///
+/// This is the number that decides whether text is readable, and it is not the
+/// framebuffer size on Windows: the framebuffer is the resolution the GL driver
+/// renders at, while the window is placed and scaled by the compositor. The two
+/// differ by the monitor's content scale under per-monitor DPI awareness, which
+/// is exactly the case worth reporting when the bar looks wrong.
+void logPhysicalWindow(GLFWwindow* window) {
+#if defined(_WIN32)
+	HWND handle = glfwGetWin32Window(window);
+	if (handle == nullptr) {
+		return;
+	}
+	RECT rect{};
+	if (GetWindowRect(handle, &rect)) {
+		LOG_NOTICE("Controller") << "  window on screen: " << (rect.right - rect.left)
+			<< "x" << (rect.bottom - rect.top) << " physical pixels";
+	}
+#else
+	(void)window;
+#endif
 }
 
 /// Drag an undecorated window by its body.
@@ -171,11 +278,23 @@ int main(int argc, char** argv) {
 		return 0;
 	}
 
+	enableDpiAwareness();
+
 	glfwSetErrorCallback(onGlfwError);
 	if (glfwInit() != GLFW_TRUE) {
 		LOG_ERROR("Controller") << "glfwInit failed";
 		return 1;
 	}
+
+	// How big text is drawn, and therefore how big the bar is: the layout is
+	// written in text units, so the window must grow by the same factor or the
+	// transport labels would be squeezed. Same DPI rule as the Player and the
+	// Dashboard (core/UiScale.h): the monitor's content scale, floored so a 4K
+	// panel at 100% scaling is still readable, overridable from mediaplayer.ini.
+	media::config::Config config;
+	media::config::load(config);
+	const float contentScale = media::ui::rawContentScale();
+	const float uiScale = media::ui::scaleForWindow(config);
 
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -183,13 +302,25 @@ int main(int argc, char** argv) {
 	// Undecorated and floating: a bar small enough to sit beside the Player,
 	// always visible, and still a normal window with a taskbar button. No
 	// WS_EX_TOOLWINDOW trickery, so it stays portable and double-clickable.
+	//
+	// Undecorated means there is no title bar to drag, so the bar itself is the
+	// drag handle (beginWindowDrag) and Esc is the only keyboard way out. Both
+	// are why the window must not be undecorated *and* unable to move.
 	glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
 	glfwWindowHint(GLFW_FLOATING, GLFW_TRUE);
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 	glfwWindowHint(GLFW_SAMPLES, 0);
 
-	gWindow = glfwCreateWindow(options.width, options.height,
-		"media-controller-cpp", nullptr, nullptr);
+	// The layout is written in framebuffer pixels, so the window is asked for at
+	// the layout size times the content scale: that keeps the framebuffer big
+	// enough to hold the layout *and* makes the bar physically bigger on a
+	// dense display, which is the point of scaling the text at all.
+	const int wantW = static_cast<int>(
+		static_cast<float>(options.width) * uiScale + 0.5f);
+	const int wantH = static_cast<int>(
+		static_cast<float>(options.height) * uiScale + 0.5f);
+
+	gWindow = glfwCreateWindow(wantW, wantH, "media-controller-cpp", nullptr, nullptr);
 	if (gWindow == nullptr) {
 		LOG_ERROR("Controller") << "glfwCreateWindow failed";
 		glfwTerminate();
@@ -197,6 +328,9 @@ int main(int argc, char** argv) {
 	}
 	glfwMakeContextCurrent(gWindow);
 	glfwSwapInterval(1);
+	// Verify the framebuffer really is the size the layout assumes, before
+	// anything is measured or drawn. See syncWindowToFramebuffer.
+	syncWindowToFramebuffer(gWindow, wantW, wantH);
 
 	const GLenum glewStatus = glewInit();
 	if (glewStatus != GLEW_OK) {
@@ -218,6 +352,8 @@ int main(int argc, char** argv) {
 	media::ControllerModel model;
 	media::ControllerView view;
 	media::PlayerClient player(options.playerHost, options.playerPort);
+
+	model.setUiScale(uiScale);
 
 	media::LuaControllerScript scripts;
 	if (!scripts.initialize()) {
@@ -257,6 +393,7 @@ int main(int argc, char** argv) {
 		ToggleSubtitles,
 		ReloadScript,
 		Seek,
+		ChooseFolder,
 	};
 
 	struct InputState {
@@ -341,6 +478,17 @@ int main(int argc, char** argv) {
 	LOG_NOTICE("Controller") << "media-controller-cpp";
 	LOG_NOTICE("Controller") << "  render backend : " << device->backendName();
 	LOG_NOTICE("Controller") << "  GL version     : " << (const char*)glGetString(GL_VERSION);
+	LOG_NOTICE("Controller") << "  text scale     : "
+		<< media::ui::describeDecision(uiScale, contentScale)
+		<< " -> buttons " << media::ui::describe(media::ui::buttonScale(uiScale));
+	LOG_NOTICE("Controller") << "  window         : " << wantW << "x" << wantH
+		<< " requested, " << fbW << "x" << fbH << " framebuffer"
+		<< " (layout size " << options.width << "x" << options.height << " at "
+		<< media::ui::describe(uiScale) << ")";
+	logPhysicalWindow(gWindow);
+	LOG_NOTICE("Controller") << "  config file    : " << media::config::configPath();
+	LOG_NOTICE("Controller") << "  folder picker  : "
+		<< (media::ui::folderPickerAvailable() ? "available" : "NOT AVAILABLE in this build");
 	LOG_NOTICE("Controller") << "  player         : http://" << options.playerHost
 		<< ":" << options.playerPort;
 	LOG_NOTICE("Controller") << "  controller API : "
@@ -385,8 +533,8 @@ int main(int argc, char** argv) {
 				+ std::abs(input.releaseY - input.pressY) > 5.0;
 
 			// Buttons are hit-tested first: a click on one is never swallowed by
-			// the window-move path. The seek bar is second. Anything else that
-			// was dragged moves the window.
+			// the window-move path. The corpus field and the seek bar are next.
+			// Anything else that was dragged moves the window.
 			const media::ControlCommand command = model.hitTest(fx, fy);
 			double percent = 0.0;
 			const bool onSeekBar = model.seekPercentAt(fx, fy, percent);
@@ -397,6 +545,8 @@ int main(int argc, char** argv) {
 				if (!player.send(command, 0.0, error)) {
 					model.setMessage("player: " + error);
 				}
+			} else if (model.corpusHit(fx, fy)) {
+				input.pending = Pending::ChooseFolder;
 			} else if (onSeekBar) {
 				input.pending = Pending::Seek;
 				input.pendingValue = percent;
@@ -432,6 +582,41 @@ int main(int argc, char** argv) {
 						model.setMessage("player: " + error);
 					}
 					break;
+				case Pending::ChooseFolder: {
+					// Runs on this thread, in the frame loop, because the picker
+					// is a modal dialog with its own message loop. It must never
+					// move to the script host or an HTTP worker.
+					bool cancelled = false;
+					const std::string chosen = media::ui::pickFolder(
+						"Select the media corpus folder", model.state().mediaFolder,
+						&cancelled);
+					if (cancelled) {
+						break;      // "cancel" is not an error: say nothing
+					}
+					if (chosen.empty()) {
+						model.setMessage(media::ui::folderPickerAvailable()
+							? "no folder chosen" : "no folder picker in this build");
+						break;
+					}
+					if (player.setMediaFolder(chosen, error)) {
+						model.setMessage("media folder: " + chosen);
+					} else {
+						// The Player is not answering, so write the choice to
+						// mediaplayer.ini ourselves: it takes effect when the
+						// Player next starts, which beats losing the selection.
+						// The Player stays the writer when it *is* up, so the two
+						// paths cannot fight over the file.
+						media::config::Config stored;
+						media::config::load(stored);
+						stored.mediaFolder = chosen;
+						const bool saved = media::config::save(stored);
+						model.setMessage(saved
+							? "media folder saved for the next Player start: " + chosen
+							: "player offline and " + media::config::configPath()
+								+ " could not be written");
+					}
+					break;
+				}
 				case Pending::None:
 					break;
 			}

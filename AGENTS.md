@@ -26,15 +26,17 @@ without a GL context.
 
 ### The launcher is the entry point, and it is a tray application
 
-`run.bat` starts it; everything else is started from its tray menu. Three
+`scripts/run.bat` starts it; everything else is started from its tray menu. Three
 properties are load-bearing and easy to break:
 
 - **Closing its window hides it** (as does Esc) — QUIT in the tray menu is the
   only exit. That is the whole point: the Player and the Controller can be closed
   and reopened without losing the launcher.
 - **No invisible processes.** If `Shell_NotifyIcon` fails, `TrayIcon::create`
-  returns `Unavailable` and the launcher shows its window, where closing really
-  exits. Never let `--tray` leave a process with no icon and no window.
+  returns `Unavailable` and the launcher shows its window, says so on its status
+  line, and closing that window really exits. Never let `--tray` leave a process
+  with no icon and no window. `--no-tray` asks for that ordinary window on
+  purpose, for a machine where no icon will ever appear.
 - **One launcher per session**, guarded by a named mutex held for the process's
   lifetime. A second launch exits quietly rather than managing the same two
   applications again. Do not release that mutex on a tray failure.
@@ -73,19 +75,32 @@ handle this; do not invoke the toolchain by hand without reading BUILDING.md.
 
 ```powershell
 pwsh -File tools/build-libmpv.ps1   # one-time: libmpv against the local ffmpeg
-pwsh -File build.ps1                # configure + build all three apps and the tests
-pwsh -File build.ps1 -Run           # build and launch the player
-pwsh -File build.ps1 -Run -App Controller   # or -App Dashboard
+pwsh -File scripts/build.ps1        # configure + build all three apps and the tests
+pwsh -File scripts/build.ps1 -Run           # build and launch the player
+pwsh -File scripts/build.ps1 -Run -App Controller   # or -App Dashboard
 ```
 
-On the root there are also two batch wrappers, which are what a person double
-clicks and what the README leads with: `build.bat` (all of the above, with
-PowerShell 7 or 5.1 whichever exists) and `run.bat` (start the launcher in the
-tray). Keep them thin — `build.ps1` is where the logic belongs.
+**Every entry point lives in `scripts/`**, and there are no batch or PowerShell
+files on the root. `build.ps1` resolves the repository root as its own parent
+directory (`Split-Path -Parent $PSScriptRoot`) and derives every other path from
+that, so it works from any working directory — keep it that way rather than
+adding `..\` to a path. The wrappers a person double-clicks are:
 
-On a machine that only has Windows PowerShell 5.1, `powershell -File build.ps1`
-is equivalent — the scripts use no PowerShell 7 feature. Do not assume `pwsh`
-exists.
+| File | What it starts |
+| ---- | -------------- |
+| `scripts/build.bat` | the build, with PowerShell 7 or 5.1, whichever exists |
+| `scripts/run.bat` | the launcher in the tray (`--show` for the window instead) |
+| `scripts/run-player.bat` | only `media-player-cpp.exe` |
+| `scripts/run-controller.bat` | only `media-controller-cpp.exe` |
+| `scripts/run-dashboard.bat` | only `media-dashboard-cpp.exe`, window shown |
+
+`scripts/_bin-dir.bat` is `call`ed by all four `run*.bat` to locate `bin/`, so
+they cannot disagree about where the executables are. Keep the wrappers thin —
+`build.ps1` is where the logic belongs.
+
+On a machine that only has Windows PowerShell 5.1, `powershell -File
+scripts/build.ps1` is equivalent — the scripts use no PowerShell 7 feature. Do
+not assume `pwsh` exists.
 
 - Binaries: `bin/media-player-cpp.exe`, `bin/media-controller-cpp.exe`,
   `bin/media-dashboard-cpp.exe`, plus `bin/libmpv-2.dll` (vendored).
@@ -102,6 +117,13 @@ exists.
   does. `run.bat` uses `Start-Process` for the opposite reason — to detach and
   redirect — and deliberately not `start`, which does not pass a redirection on
   to its child.
+- **The tray icon cannot be tested in this session.** `Shell_NotifyIcon` fails
+  with error 5 (ACCESS_DENIED) for *every* program here, in a 20-line probe and
+  under the Task Scheduler too. `tools/verify-launcher.ps1` detects that and
+  checks the documented fallback instead: the window is shown, and closing it
+  really exits. Do not "fix" a missing icon by changing the tray code — check
+  the log line first, and use `--no-tray` when you want the ordinary window on
+  purpose.
 
 ### Why libmpv is built from source
 
@@ -129,11 +151,39 @@ src/app/dashboard/            Launcher: DashboardModel/View, AppLauncher (AppPro
                               TrayIcon (the only Win32 in the launcher)
 src/app/http/                 CommandQueue + HttpJsonClient, shared by both sides
 src/app/render/               RenderDevice + the one OpenGL implementation
-src/app/hud/                  bitmap font, glyph data
+src/app/hud/                  bitmap font, glyph data, UiScaleGlfw (DPI),
+                              FolderPicker (the one shell dialog)
 src/backends/mpv/MPVSurface   the only file that attaches mpv to GL
-src/core/                     Log, Platform (exe dir, data dir, scripts dir, extensions)
+src/core/                     Log, Platform (exe dir, data dir, scripts dir,
+                              extensions), UiScale (text sizing), AppConfig
+                              (mediaplayer.ini)
 src/media/                    IClipSource, MediaClipLibrary, MediaPlayerController, ScriptHost
 ```
+
+**One rule for text size, in `core/UiScale.h`:** a window's text scale is
+`max(monitor content scale, per-role pixel floor)`, with an optional override
+from `mediaplayer.ini`. All three windows call the same helpers and size their
+windows by the same factor, so they cannot drift apart. The floor is the part
+that matters — a 4K panel at 100% Windows scaling reports a content scale of 1.0,
+and without a floor the text stays a 7-pixel capital. Both app main files call
+`SetProcessDpiAwarenessContext` before `glfwInit`; without it Windows lies about
+the panel size and the compositor blurs the result.
+
+**Layout is written in text units, not pixels.** `ControllerModel::layout` and
+`DashboardModel::layout` express every constant as a multiple of one glyph cell
+times the DPI scale, and each window's default size is multiplied by the same
+scale. This is what lets a bigger font fit: scaling text inside a fixed-size card
+overflows it. If you add a layout constant, write it in units and let the single
+multiply at the top of `layout()` scale it.
+
+**`mediaplayer.ini` is shared state.** `core/AppConfig` reads and writes it next
+to the executables. The **Player is the single writer of the media folder** when
+it is up — `/api/media-dir` re-points the library and persists the choice — and
+the Controller and the Dashboard write it only as a fallback when the Player is
+down. Keep that precedence: two writers racing over one key is how the displayed
+folder and the scanned folder start disagreeing. The format is deliberately dumb
+(`key = value`, backslash-escaped) so it needs no JSON dependency in `core/` and
+a person can edit it.
 
 **The `RenderDevice` rule (hard):** nothing above `src/app/render/` may name a
 graphics API — and that includes all three `main` files. `RenderDevice.h` exposes
@@ -186,13 +236,23 @@ The player, `http://127.0.0.1:8080`, localhost only:
 | Subtitles | POST | `/api/subtitles` |
 | HUD | GET/POST | `/api/hud` |
 | Fullscreen | GET/POST | `/api/fullscreen` |
+| Media folder | GET/POST | `/api/media-dir` (POST `{"path":"<folder>"}`; `""` means the default) |
 | Open clip | POST | `/api/clips/{index}` |
 | Rescan media | POST | `/api/clips/rescan` |
 | Rescan scripts | POST | `/api/scripts/rescan` |
 
 The first eight keys of `/api/status` (`loaded`, `playing`, `isImage`,
 `clipIndex`, `clipCount`, `clipName`, `subtitlesEnabled`, `subtitleText`) are a
-**frozen contract**. Everything else on that object is additive.
+**frozen contract**. Everything else on that object is additive —
+`mediaFolder` is one of those additions.
+
+**`/api/media-dir` deliberately has no containment check**, unlike
+`/api/clips/{path}`: choosing the corpus is an operator decision made through a
+folder picker, and there is no single directory it could sensibly be restricted
+to. The guard that matters is the one already on every route — the server binds
+to `127.0.0.1` and refuses any non-loopback client. Do not add a path-taking
+route that *reads* files without a containment check; do not "fix" this one by
+adding one.
 
 The controller, `http://127.0.0.1:8081`, localhost only:
 
