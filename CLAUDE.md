@@ -7,23 +7,28 @@ in `AGENTS.md` — read it first.
 
 ## Claude-specific quick reference
 
-- This is an **openFrameworks** C++ media player (images/video, OCR subtitles,
-  region framing) with an HTTP control API on `:8080`. It's an OF project under
-  `apps/myApps/` (`OF_ROOT = ../../..`); addons: `ofxGui`, `ofxNetwork`.
-- It is **app #3** of a three-app system, driven by the **metaagent** C++
-  controller (`vecnode/metaagent`) over `/api/media/*`. metaagent can also build
-  it (`make Release`) and run `bin/media-player-cpp.exe`, tracking the PID. Keep
-  the HTTP routes in `src/HttpControlServer.cpp` stable and additive.
-- **Build with MSYS2 MinGW64, not MSVC:** `make Release`, then
-  `cd bin && ./media-player-cpp.exe` (the exe needs `bin/` as its cwd).
-- **Threading rule:** never touch `ofVideoPlayer` off the main thread — the HTTP
-  server executes commands via the polled `update()` on the GUI thread.
-  `MediaPlaybackEngine` also background-decodes the next image (`ofLoadImage`
-  into `ofPixels`, no GL) and uploads it to a texture on the main thread —
-  never call OF/GL from that worker.
-- **Clip switches must stay instant AND accurate** — prefetch into a standby
-  slot, swap only when verified ready, else fall back to a synchronous load.
-  Applies to images now too (previously synchronous-only, ~50-90ms/switch).
-- **Don't** commit `bin/*` (except `bin/data/`), `obj/`, binaries, or
-  media/corpus files (`*.md`, images, `*.pt`) — all git-ignored.
-- Media/corpus + display behavior: `README.md`.
+- **Stack:** GLFW 3 + OpenGL 3.3 core + libmpv (render API). Scriptable via mpv
+  Lua/JS. No openFrameworks, no widget toolkit — this repo used to be an
+  openFrameworks project and that tree is gone.
+- **The `RenderDevice` rule is the load-bearing convention:** nothing above
+  `src/app/render/` may name a graphics API. `MPVSurface` is the single
+  sanctioned exception, because it attaches mpv's output to a GL texture.
+- **Build:** `pwsh -File build.ps1`. It must run with PATH confined to MSYS2 or
+  `cc1plus.exe` dies silently printing nothing. Never call the toolchain by hand
+  without reading `BUILDING.md`.
+- **libmpv is built from source** by `tools/build-libmpv.ps1` because the MSYS2
+  package has a libavcodec version mismatch (`62.28.101` vs `62.28.100`). Do not
+  swap it for pacman's.
+- **Threading:** the decoder is main-thread only; HTTP workers submit closures
+  and `HttpControlServer::poll()` drains them each frame. Never touch the
+  controller from a worker thread.
+- **Scripts** load only from `bin/data/scripts`, only before
+  `mpv_initialize()`, and cannot be unloaded at runtime — reload means restart.
+  The option is `scripts` (plural, a path list), not `script`.
+- **Status contract:** the first eight keys of `/api/status` are frozen; add
+  fields, never remove or rename them.
+- **Security defaults stay off:** `ytdl`, `load-scripts`, `config`,
+  `input-conf`, `access-references`, `autoload-files`.
+- **Verify with evidence.** `bin/media_tests.exe` covers the API and library
+  logic without a GL context; `p0/audio_probe.exe` proves the audio path; prefer
+  screenshots over assertions for anything visual.

@@ -2,17 +2,12 @@
 	"folders": [
 		{
 			"path": "."
-		},
-		{
-			"path": "${workspaceRoot}/../../../../libs/openFrameworks"
-		},
-		{
-			"path": "${workspaceRoot}/../..\\..\\..\\addons\\ofxGui"
-		},
-		{
-			"path": "${workspaceRoot}/../..\\..\\..\\addons\\ofxNetwork"
 		}
 	],
-	"openFrameworksProjectGeneratorVersion": "0.103.0",
-	"settings": {}
+	"settings": {
+		"C_Cpp.default.cppStandard": "c++17",
+		"files.associations": {
+			"*.inc": "cpp"
+		}
+	}
 }

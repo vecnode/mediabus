@@ -5,116 +5,161 @@ is the canonical agent guide; `CLAUDE.md` defers to it.
 
 ## What this repository is
 
-An **openFrameworks** (C++) media player for images and video, with optional OCR
-subtitles, region framing from detection metadata, and an **HTTP control API**.
-It is an OF *project*, expected to live under an openFrameworks install at
-`apps/myApps/media-player-cpp` (the Makefile resolves `OF_ROOT = ../../..`).
+A **C++ video player with a localhost HTTP control API**, built on:
 
-Addons (`addons.make`): `ofxGui`, `ofxNetwork`.
+- **GLFW 3** for the window and input,
+- **OpenGL 3.3 core** for rendering,
+- **libmpv** (render API) for video, audio, A/V sync and subtitles.
+
+It is also **scriptable**: operator-installed Lua or JS scripts extend player
+behaviour without recompiling.
+
+There is **no widget toolkit** — no ImGui, no Qt, no GTK. The on-screen HUD is
+drawn as quads through the same `RenderDevice` seam that composites video.
+
+This was formerly an openFrameworks project. The openFrameworks tree, its
+addons, the OCR/corpus layer and the `ytdl` integration were all removed; see
+"History" below.
 
 ### Role in the larger system
 
 This is **app #3 of a three-app system**, controlled by **metaagent** (the C++
 agent controller, repo `vecnode/metaagent`). metaagent drives playback over this
-app's HTTP API and can build/run the process for centralised control:
+app's HTTP API on `:8080` and can build/run the process for centralised control.
 
-- Playback: metaagent `POST /api/media/*` proxies to this app's API on `:8080`.
-- Build:  metaagent `POST /api/media/build` runs the configured build command
-  (`make Release`) in this project dir (`METAAGENT_MEDIA_PLAYER_DIR`).
-- Run:    metaagent `POST /api/media/run` launches `bin/media-player-cpp.exe`
-  (tracking its PID; stop via `POST /api/media/process/stop`).
-
-App #2 is `vecnode/pre-training` (the LoRA adapter). This player does not call it
-directly — metaagent coordinates them. The OCR/detection corpus this player
-renders (`PDF_TEXT.md`, `OBJS_TEXT.md` in `bin/data/`) originates from that
-pipeline / the UE plugin.
+**The HTTP API is the contract that matters.** Keep existing routes and response
+shapes stable and additive — metaagent's `/api/media/*` proxy depends on them.
 
 ## Build & run
 
-**MSYS2 MinGW64 shell**, from the project folder (OF on Windows is a MinGW
-toolchain — do **not** build this with MSVC):
+The build must use a **PATH confined to MSYS2**. With a normal PATH,
+`C:\Strawberry\c\bin\libwinpthread-1.dll` shadows MSYS2's and `cc1plus.exe`
+dies with `STATUS_ENTRYPOINT_NOT_FOUND`, printing nothing at all. The scripts
+handle this; do not invoke the toolchain by hand without reading BUILDING.md.
 
-```bash
-make Release
-cd bin && ./media-player-cpp.exe        # or: make RunRelease
+```powershell
+pwsh -File tools/build-libmpv.ps1   # one-time: libmpv against the local ffmpeg
+pwsh -File build.ps1                # configure + build
+pwsh -File build.ps1 -Run           # build and launch
 ```
 
-- The binary is `bin/media-player-cpp.exe`; it must run with `bin/` as the
-  working directory so it finds `bin/data/`.
-- `make Debug` / `make` builds the debug target.
-- `make sync-corpus` (see `scripts/sync_metaagent_corpus.sh`) refreshes the
-  metaagent corpus sources.
+- Binary: `bin/media-player-cpp.exe`, plus `bin/libmpv-2.dll` (vendored).
+- Tests: `bin/media_tests.exe` (run with `bin/` as the working directory).
+- The app resolves `bin/data/` **relative to the executable**, so the working
+  directory does not matter for media lookup.
 
-> When launched by metaagent, the build command and run binary are configurable
-> (`METAAGENT_MEDIA_BUILD_CMD`, `METAAGENT_MEDIA_RUN_CMD`); the run process is
-> started with `bin/` as its working directory.
+### Why libmpv is built from source
 
-## HTTP control API
+The MSYS2 `mingw-w64-x86_64-mpv` package fails at load:
 
-`http://127.0.0.1:8080`, localhost-only (`HttpControlServer`, `ofxTCPServer`).
-`update()` is polled from the main thread each frame, so commands run on the GUI
-thread and `ofVideoPlayer` stays thread-safe.
+```
+libavcodec: build version 62.28.101 incompatible with runtime version 62.28.100
+```
+
+It was built against a libavcodec one patch newer than the installed ffmpeg, and
+`mpv.exe --version` fails too. `tools/build-libmpv.ps1` builds mpv against the
+ffmpeg that is actually present and vendors the result into `bin/` and `lib/`.
+**Do not replace this with a pacman package.**
+
+## Architecture
+
+```
+src/core/       Log, Platform (exe dir, data dir, scripts dir, extensions)
+src/media/      IClipSource, MediaClipLibrary, MediaPlayerController, ScriptHost
+src/app/        HttpControlServer, render/{RenderDevice,GlRenderDevice}, hud/
+src/backends/   mpv/MPVSurface
+src/main.cpp    window, frame loop, wiring
+```
+
+**The `RenderDevice` rule (hard):** nothing above `src/app/render/` may name a
+graphics API. `RenderDevice.h` exposes textured quads, solid/outline rects,
+scissor clipping, a 5x7 text draw and a texture pool. `GlRenderDevice.cpp` is
+the only translation unit that includes GL headers. A Vulkan or D3D12 backend
+is a new implementation of that header, not a rewrite. `MPVSurface` is the one
+sanctioned exception, because it must attach mpv's output to a GL texture.
+
+**Threading:**
+
+- The main thread owns the GL context, the frame loop and the decoder. libmpv's
+  render API requires the GL context to be current in the calling thread and to
+  be the same context the render context was created with; rendering on the
+  main thread satisfies that by construction.
+- HTTP worker threads **never** touch the controller or the decoder. Each
+  handler submits a closure to a queue and waits; `HttpControlServer::poll()`
+  runs it on the main thread once per frame. Preserve that.
+- `MPVSurface::onRenderUpdate` runs on an mpv thread and only sets an atomic
+  flag. Never call GL or another mpv function from it.
+
+**Scripts** (see `ScriptHost.h`) are discovered only under `bin/data/scripts`
+and attached **before** `mpv_initialize()`, because mpv only reads the option
+then. mpv cannot attach or detach a script at runtime, so reload means restart —
+the API says so rather than pretending otherwise.
+
+## HTTP API
+
+`http://127.0.0.1:8080`, localhost only.
 
 | Action | Method | Endpoint |
 | ------ | ------ | -------- |
 | Status | GET  | `/api/status` |
+| Position | GET | `/api/position` |
 | Playlist | GET | `/api/clips` |
-| Next | POST | `/api/next` |
-| Previous | POST | `/api/previous` |
+| Health | GET | `/api/health` |
+| Scripts | GET | `/api/scripts` |
 | Play | POST | `/api/play` |
 | Stop | POST | `/api/stop` |
-| Subtitles | POST | `/api/subtitles` + `{"enabled": true}` |
+| Next | POST | `/api/next` |
+| Previous | POST | `/api/previous` |
+| Pause | POST | `/api/pause` |
+| Seek | POST | `/api/seek` |
+| Speed | POST | `/api/speed` |
+| Volume | POST | `/api/volume` |
+| Subtitles | POST | `/api/subtitles` |
 | Open clip | POST | `/api/clips/{index}` |
+| Rescan media | POST | `/api/clips/rescan` |
+| Rescan scripts | POST | `/api/scripts/rescan` |
 
-Images are listed before videos. Play/Stop apply to video only. Keep this surface
-stable — metaagent's media proxy depends on these exact routes and shapes.
-
-## Code layout
-
-```
-src/
-  main.cpp / ofApp.*            OF entry point + app shell
-  MediaPlayerController.*       Command surface the HTTP server drives
-  HttpControlServer.*           ofxNetwork JSON HTTP/1.1 API (port 8080)
-  MediaPlaybackEngine.*         Video/image playback state
-  MediaClipLibrary.* / IClipSource.h   Playlist + clip sources
-  MediaCorpusProvider.*         Loads PDF_TEXT.md / OBJS_TEXT.md (OCR + regions)
-  MediaPanel.* / MediaRenderer.*       Layout + draw (letterboxed, region framing)
-  SubtitlesOverlay.*            On-screen OCR subtitle overlay
-  PlatformVideo.* / MediaFoundationBackend.cpp   Platform video backend
-  metaagent/                    Vendored metaagent core/media headers (shared types)
-```
+The first eight keys of `/api/status` (`loaded`, `playing`, `isImage`,
+`clipIndex`, `clipCount`, `clipName`, `subtitlesEnabled`, `subtitleText`) are a
+**frozen contract**. Everything else on that object is additive.
 
 ## Conventions & guardrails
 
-- **C++ / openFrameworks idioms** — match the surrounding OF style (`ofApp`
-  lifecycle, `of*` types). HTTP work stays in `HttpControlServer`; playback
-  state in the engine/controller, not the server.
-- **Threading:** never touch `ofVideoPlayer` off the main thread. The HTTP server
-  only queues/executes via the polled `update()` on the GUI thread — preserve
-  that. `MediaPlaybackEngine` also runs a background image-decode thread
-  (`beginAsyncImagePrefetch`/`tickAsyncImagePrefetch`) to prefetch the next
-  image ahead of a switch — this is decode-only (`ofLoadImage` into `ofPixels`,
-  no GL calls), the same pattern `ofxThreadedImageLoader` uses; the GPU texture
-  upload (`setFromPixels`) still happens on the main thread in
-  `tickAsyncImagePrefetch()`. Never call OF/GL APIs from that worker thread.
-- **Clip switching must stay both instant and accurate.** `next`/`previous`
-  swap from a prefetched standby slot when ready (`isStandbyReadyFor`) and only
-  fall back to a synchronous load otherwise — this applies to images now too
-  (previously images had no prefetch path at all and always loaded
-  synchronously on every switch, ~50-90ms per call). Any change to the
-  prefetch/switch state machine in `MediaPlaybackEngine` must preserve the
-  invariant that a switch never reports/display a clip other than the one it
-  claims to (no stale swaps) — verified by hammering `/api/next` back-to-back
-  and checking the returned `clipIndex`/`clipName` sequence has no skips or
-  duplicates.
-- **Media data** lives in `bin/data/` and is **not** deleted by builds. Region
-  framing + the green debug box require entries in `OBJS_TEXT.md` with
-  `text_regions`; `PDF_TEXT.md` covers OCR-only subtitles.
-- **Don't commit build output or media:** `bin/*` (except `bin/data/`), `obj/`,
-  binaries, and image/video/`*.pt`/`*.md` corpus files are git-ignored — keep it
-  that way.
-- **Keep the HTTP API backward-compatible** with metaagent's `/api/media/*`
-  proxy; if you add a route, add it additively.
+- **Match the surrounding C++ style:** tabs for indentation, `media::` namespace,
+  `LOG_NOTICE("Category") << ...` for logging, `#pragma once`.
+- **Security posture is deliberate.** These stay off: `ytdl` (the default spawns
+  an external downloader subprocess), `load-scripts` (would auto-run anything in
+  the user's mpv config dir), `config`, `input-conf`, `access-references`,
+  `autoload-files`, `load-unsafe-playlists`. Only `bin/data/scripts` is ever
+  scanned, and any route taking a path accepts files inside the data directory
+  only. See `MPVSurface::applyOptions` and `HttpControlServer::addClipPath`.
+- **mpv option names differ from the CLI.** libmpv's option table has `scripts`
+  (a path list), not `script`. `p0/option_probe.cpp` answers this kind of
+  question in seconds; use it rather than guessing.
+- **MSYS-style paths from PowerShell must be quoted** (`"-IC:/msys64/..."`), or
+  the linker resolves nothing. A Windows path with backslashes becomes an
+  invalid escape in CMake and meson generated files. Forward slashes everywhere.
+- **Lua scripts must be pure ASCII with no BOM** — Lua 5.1 treats a byte-order
+  mark as a syntax error, and a mangled em-dash breaks the chunk.
+- **Tests are the contract.** Add a check to `tests/test_main.cpp` for any API
+  or library behaviour you change; it runs without a GL context.
+- **Do not commit build output, media, or the mpv build cache.** `bin/*` (except
+  `bin/data/`), `build/`, `.cache/`, `obj/`, binaries and `*.mp4`/`*.png` test
+  media are git-ignored. `bin/libmpv-2.dll`, `lib/libmpv.dll.a` and `lib/mpv/*.h`
+  are intentionally tracked so a clone runs without a source build.
 
-See `README.md` for media-file/corpus details and the display behavior.
+## History
+
+Removed in the libmpv migration, and not to be reintroduced:
+
+- the openFrameworks project shell (`Makefile`, `config.make`, `addons.make`,
+  `make`-based tooling, the `ofApp` lifecycle),
+- `PlatformVideo` and the Media Foundation backend that `#include`d
+  openFrameworks' own `.cpp` files,
+- the entire OCR/corpus layer (`MediaCorpusProvider`, `src/metaagent/**`,
+  `PDF_TEXT.md`/`OBJS_TEXT.md`, region framing and its debug box),
+- `ytdl` and the external-downloader subprocess path,
+- the `SubtitlesOverlay` text renderer (mpv renders subtitles itself).
+
+`LICENSE-APACHE-2.0` records the licence this project used before the move to
+GPL-2.0-or-later, which the GPL libmpv makes necessary.

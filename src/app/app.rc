@@ -1,0 +1,14 @@
+/*
+ * app.rc - Windows executable resources.
+ *
+ * The application icon was committed long ago but never actually attached to
+ * the binary, so it showed the default Windows icon in the taskbar and title
+ * bar. This wires it up.
+ *
+ * The path is relative to this file and uses a forward slash so windres
+ * resolves it identically no matter which directory the build runs from.
+ */
+
+#include <windows.h>
+
+IDI_APPICON ICON "../../assets/icon/icon.ico"
