@@ -238,6 +238,64 @@ try {
     Say "controller path escape    : $($escapeReply | ConvertTo-Json -Compress)"
     Check 'controller refuses escape' ($escapeReply.ok -eq $false) "$($escapeReply.error)"
 
+    # --- the script-text routes, which the Dashboard's editor uses ---------
+    # Read is the round trip the editor depends on: it must hand back exactly
+    # the text that is on disk, or saving would rewrite the file from a lossy
+    # copy.
+    $content = Get-Json "http://127.0.0.1:$ControllerPort/api/controller/script-content?name=controller-example.lua"
+    Say "script content read       : $($content.ok) ($($content.bytes) bytes)"
+    Check 'script content reads' ($content.ok -eq $true -and $content.text.Length -gt 0) "bytes=$($content.bytes)"
+    Check 'script content is the file' ($content.text -match 'controller-example\.lua') 'the header comment is present'
+
+    # Validation must compile WITHOUT running: a draft that would fail at runtime
+    # is still valid Lua, so ok=true and no line is reported.
+    $goodDraft = '{"name":"draft.lua","text":"local a = 1\nreturn a\n"}'
+    $good = Post-Json "http://127.0.0.1:$ControllerPort/api/controller/validate" $goodDraft
+    Say "validate good draft       : $($good | ConvertTo-Json -Compress)"
+    Check 'validate accepts valid lua' ($good.ok -eq $true) "$($good.error)"
+
+    # And a syntax error must come back with a line, because that is what puts the
+    # marker on the right line in the editor.
+    #
+    # The line is the one LUA reports, not the one a person might guess: for
+    # `local b =` followed by end of input, Lua blames the line where the input
+    # ended (3 - the trailing empty line), not the line of the incomplete
+    # statement. The test asserts what the compiler says, because that is what the
+    # marker in the gutter has to agree with.
+    $badDraft = '{"name":"draft.lua","text":"local a = 1\nlocal b =\n"}'
+    $badValidate = Post-Json "http://127.0.0.1:$ControllerPort/api/controller/validate" $badDraft
+    Say "validate bad draft        : $($badValidate | ConvertTo-Json -Compress)"
+    Check 'validate rejects bad lua' ($badValidate.ok -eq $false) "$($badValidate.error)"
+    Check 'validate reports a line' ($badValidate.line -ge 2) "line=$($badValidate.line)"
+
+    # Saving a script that does not compile is refused, so the running script
+    # cannot be replaced by one that will not load.
+    $badSave = Post-Json "http://127.0.0.1:$ControllerPort/api/controller/script-save" $badDraft
+    Say "save refuses bad draft    : $($badSave | ConvertTo-Json -Compress)"
+    Check 'save refuses a broken draft' ($badSave.ok -eq $false) "$($badSave.error)"
+
+    # A round trip through save: write a new script, read it back, then remove it.
+    # Leaving it behind would make the next run's script list non-deterministic.
+    $newScript = '{"name":"zz-verify-roundtrip.lua","text":"-- written by verify-live\nreturn 1\n"}'
+    $saved = Post-Json "http://127.0.0.1:$ControllerPort/api/controller/script-save" $newScript
+    Say "script save               : $($saved | ConvertTo-Json -Compress)"
+    Check 'script saves' ($saved.ok -eq $true) "$($saved.error)"
+    $roundTrip = Get-Json "http://127.0.0.1:$ControllerPort/api/controller/script-content?name=zz-verify-roundtrip.lua"
+    Check 'a saved script reads back identical' `
+        ($roundTrip.text -eq "-- written by verify-live`nreturn 1`n") "got: $($roundTrip.text)"
+
+    # The same containment rule as the run route, on the route that WRITES.
+    $escapeRead = Get-Json "http://127.0.0.1:$ControllerPort/api/controller/script-content?name=..%2F..%2Fhosts"
+    Say "script read escape        : $($escapeRead | ConvertTo-Json -Compress)"
+    Check 'script read refuses a path' ($escapeRead.ok -eq $false -or $null -eq $escapeRead.ok) "$($escapeRead.error)"
+
+    $escapeSave = Post-Json "http://127.0.0.1:$ControllerPort/api/controller/script-save" '{"name":"..\\evil.lua","text":"return 1\n"}'
+    Say "script save escape        : $($escapeSave | ConvertTo-Json -Compress)"
+    Check 'script save refuses a path' ($escapeSave.ok -eq $false) "$($escapeSave.error)"
+
+    # Clean up the round-trip file through the same API that made it.
+    Remove-Item (Join-Path $Repo 'bin\data\controller-scripts\zz-verify-roundtrip.lua') -Force -ErrorAction SilentlyContinue
+
     # --- Dashboard -------------------------------------------------------
     # The Dashboard's whole job is noticing the other two and starting them. It
     # is started last, with both already up, so what it has to report is exactly

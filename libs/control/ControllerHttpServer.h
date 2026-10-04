@@ -25,12 +25,20 @@ class LuaControllerScript;
 ///
 /// Routes (all localhost-only, like the Player's):
 ///
-///   GET  /api/controller/status          bar + player state
-///   GET  /api/controller/scripts         scripts on disk, and which is loaded
-///   POST /api/controller/script          {"path":"x.lua"} or {"source":"..."}
-///   POST /api/controller/stop-script     stop the running script
-///   POST /api/controller/reload-script   reload the running script from disk
-///   POST /api/controller/command         {"command":"next"}, {"open":0}, {"seek":50}
+///   GET  /api/controller/status             bar + player state
+///   GET  /api/controller/scripts            scripts on disk, and which is loaded
+///   GET  /api/controller/script-content     ?name=x.lua - the text of one script
+///   POST /api/controller/script             {"path":"x.lua"} or {"source":"..."}
+///   POST /api/controller/script-save        {"name":"x.lua","text":"..."}
+///   POST /api/controller/validate           {"name":"x.lua","text":"..."}
+///   POST /api/controller/stop-script        stop the running script
+///   POST /api/controller/reload-script      reload the running script from disk
+///   POST /api/controller/command            {"command":"next"}, {"open":0}, {"seek":50}
+///
+/// The script-text routes exist for the Dashboard's editor. They are the only
+/// routes in either application that write a file, so they are the strictest:
+/// a bare .lua name inside the scripts directory, the text must compile as Lua
+/// before it is written, and nothing is ever executed by a save.
 ///
 /// The three things only the host knows. Passed in, never inherited, so this
 /// class never sees GL, a window or a Lua state directly and tests can stub the
@@ -66,13 +74,24 @@ public:
 			StopScript,
 			ReloadScript,
 			RescanScripts,
+			/// Read one script's text, for the Dashboard's editor.
+			ReadScript,
+			/// Write one script's text back, after checking that it compiles.
+			SaveScript,
+			/// Compile a draft without running it, and report the line it failed
+			/// on. This is what puts an error marker on the right line while the
+			/// operator types, instead of only at the next run.
+			ValidateScript,
 		};
 
 		Kind kind = Kind::Status;
 		ControlCommand command = ControlCommand::None;
 		std::size_t clipIndex = 0;
 		double value = 0.0;
+		/// The source text, for RunSource and for the two script-text routes.
 		std::string text;
+		/// A bare script name, for ReadScript and SaveScript.
+		std::string name;
 	};
 
 	explicit ControllerHttpServer(ControllerHost host);

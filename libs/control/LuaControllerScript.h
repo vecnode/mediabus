@@ -97,6 +97,20 @@ public:
 	bool runSource(const std::string& source, const std::string& chunkName,
 		std::string& error);
 
+	/// Compile `source` and throw the result away, WITHOUT running a single
+	/// instruction of it.
+	///
+	/// This is what lets the Dashboard show "line 12: 'end' expected" while the
+	/// operator types, instead of only finding out on the next run. On failure
+	/// `errorLine` receives the 1-based line Lua blamed, or 0 when the message
+	/// carries no line, and `error` receives the message with the
+	/// `chunk:line:` prefix stripped.
+	///
+	/// Nothing is executed and no state is touched, so a broken draft cannot
+	/// disturb a healthy running script. Returns true when the source compiles.
+	bool validateSource(const std::string& source, const std::string& chunkName,
+		std::size_t& errorLine, std::string& error) const;
+
 	/// Stop the running script and drop its OnTick handler.
 	void stopScript();
 	bool scriptRunning() const { return !currentScript_.empty(); }

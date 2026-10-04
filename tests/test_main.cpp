@@ -14,6 +14,7 @@
 #include "control/ControllerModel.h"
 #include "control/LuaControllerScript.h"
 #include "control/PlayerClient.h"
+#include "control/ScriptDocument.h"
 #include "control/TransportAction.h"
 #include "control/DashboardModel.h"
 #include "core/AppConfig.h"
@@ -1522,12 +1523,17 @@ TEST(lua_script_reports_a_refused_player_call) {
 }
 
 // ---------------------------------------------------------------------------
-// Dashboard: rows, availability and hit tests.
+// Dashboard: rows, availability, and which action a row may offer.
+//
+// The hit-test and card-geometry tests that used to live here are GONE with the
+// geometry they measured: the Dashboard's interface is Dear ImGui now, so there
+// are no rectangles in this library to overlap. What replaced them tests the
+// same rule at the level it now lives at - canLaunch()/canStop() and the actions
+// they gate - which is a stronger statement than "the centre of this button maps
+// to that command", and it needs no window.
 // ---------------------------------------------------------------------------
 TEST(dashboard_rows_report_availability_and_running_state) {
 	media::DashboardModel model;
-	model.layout(static_cast<float>(media::DashboardModel::kDefaultWidth),
-		static_cast<float>(media::DashboardModel::kDefaultHeight));
 	checkEq(model.rows().size(), media::DashboardModel::kRowCount, "there are two rows");
 	checkEq(model.availableCount(), std::size_t{0}, "nothing is available before any probe");
 	checkEqStr(model.rows()[0].title, "Player", "the first row is the Player");
@@ -1559,75 +1565,377 @@ TEST(dashboard_rows_report_availability_and_running_state) {
 	check(!model.rows()[0].managed, "an app this Dashboard did not start is unmanaged");
 }
 
-TEST(dashboard_hit_test_only_offers_actions_that_make_sense) {
+TEST(dashboard_only_offers_actions_that_make_sense) {
 	media::DashboardModel model;
-	model.layout(static_cast<float>(media::DashboardModel::kDefaultWidth),
-		static_cast<float>(media::DashboardModel::kDefaultHeight));
 
 	// Nothing available: neither button does anything.
-	check(model.hitTest(model.rows()[0].launchButton.centreX(),
-		model.rows()[0].launchButton.centreY()) == media::DashboardAction::None,
+	check(!model.rowFor(media::DashboardApp::Player).canLaunch(),
 		"an unavailable app cannot be launched");
+	check(model.launchActionFor(media::DashboardApp::Player)
+			== media::DashboardAction::None,
+		"and offers no launch action");
 
 	media::AppStatus stopped;
 	model.setStatus(media::DashboardApp::Player, stopped, "C:\\bin\\vn-mediabus-player.exe",
 		media::AppProbe::kPlayerPort);
-	check(model.hitTest(model.rows()[0].launchButton.centreX(),
-		model.rows()[0].launchButton.centreY()) == media::DashboardAction::LaunchPlayer,
+	check(model.rowFor(media::DashboardApp::Player).canLaunch(),
 		"a stopped Player row offers LAUNCH");
-	check(model.hitTest(model.rows()[0].stopButton.centreX(),
-		model.rows()[0].stopButton.centreY()) == media::DashboardAction::None,
+	check(model.launchActionFor(media::DashboardApp::Player)
+			== media::DashboardAction::LaunchPlayer,
+		"and the action names the Player");
+	check(!model.rowFor(media::DashboardApp::Player).canStop(),
 		"a stopped row offers no STOP");
+	check(model.stopActionFor(media::DashboardApp::Player)
+			== media::DashboardAction::None,
+		"and no stop action");
 
-	// Running but unmanaged: LAUNCH is inert and STOP must not be offered, or
-	// the Dashboard would kill an app it did not start.
+	// Running but unmanaged: LAUNCH is inert and STOP must not be offered, or the
+	// Dashboard would kill an application it did not start.
 	media::AppStatus external;
 	external.apiUp = true;
+	external.childPid = 0;
 	model.setStatus(media::DashboardApp::Player, external, "C:\\bin\\vn-mediabus-player.exe",
 		media::AppProbe::kPlayerPort);
-	check(model.hitTest(model.rows()[0].launchButton.centreX(),
-		model.rows()[0].launchButton.centreY()) == media::DashboardAction::None,
+	check(!model.rowFor(media::DashboardApp::Player).canLaunch(),
 		"a running app is not launched again");
-	check(model.hitTest(model.rows()[0].stopButton.centreX(),
-		model.rows()[0].stopButton.centreY()) == media::DashboardAction::None,
+	check(!model.rowFor(media::DashboardApp::Player).canStop(),
 		"an unmanaged app is not stopped");
+	check(model.stopActionFor(media::DashboardApp::Player)
+			== media::DashboardAction::None,
+		"the stop action refuses an app this launcher did not start");
 
-	// Running and managed: STOP is offered.
+	// Running and managed: STOP is offered, and it names the right application.
 	media::AppStatus managed;
 	managed.apiUp = true;
 	managed.childPid = 4242;
 	model.setStatus(media::DashboardApp::Controller, managed,
 		"C:\\bin\\vn-mediabus-controller.exe", media::AppProbe::kControllerPort);
-	check(model.hitTest(model.rows()[1].stopButton.centreX(),
-		model.rows()[1].stopButton.centreY()) == media::DashboardAction::StopController,
+	check(model.rowFor(media::DashboardApp::Controller).canStop(),
 		"a managed app row offers STOP");
-
-	// Rows do not claim clicks that belong to nothing.
-	check(model.hitTest(1.0f, 1.0f) == media::DashboardAction::None,
-		"a click in the title area acts on nothing");
+	check(model.stopActionFor(media::DashboardApp::Controller)
+			== media::DashboardAction::StopController,
+		"and the action names the Controller");
+	check(!model.rowFor(media::DashboardApp::Controller).canLaunch(),
+		"a running Controller is not launched again");
 }
 
-TEST(dashboard_layout_keeps_rows_inside_the_window) {
+TEST(dashboard_row_for_finds_the_row_by_application) {
 	media::DashboardModel model;
-	model.layout(static_cast<float>(media::DashboardModel::kDefaultWidth),
-		static_cast<float>(media::DashboardModel::kDefaultHeight));
-	for (const media::DashboardRow& row : model.rows()) {
-		check(row.card.x >= 0.0f, "a card starts inside the window");
-		check(row.card.x + row.card.w <= media::DashboardModel::kDefaultWidth + 0.5f,
-			"a card ends inside the window");
-		check(row.card.y >= 0.0f, "a card starts below the top edge");
-		check(row.card.y + row.card.h <= media::DashboardModel::kDefaultHeight + 0.5f,
-			"a card ends above the bottom edge");
-		// Buttons sit inside their card and in the order STOP then LAUNCH.
-		check(row.stopButton.x >= row.card.x, "STOP starts inside its card");
-		check(row.launchButton.x + row.launchButton.w <= row.card.x + row.card.w + 0.5f,
-			"LAUNCH ends inside its card");
-		check(row.stopButton.x + row.stopButton.w <= row.launchButton.x + 0.5f,
-			"STOP does not overlap LAUNCH");
+	checkEqStr(model.rowFor(media::DashboardApp::Player).title, "Player",
+		"rowFor finds the Player");
+	checkEqStr(model.rowFor(media::DashboardApp::Controller).title, "Controller",
+		"rowFor finds the Controller");
+	// Asking for the Dashboard itself is not a row: it is this process. The
+	// lookup must not wander off the end of the array.
+	checkEqStr(model.rowFor(media::DashboardApp::Dashboard).title, "Player",
+		"a row for the Dashboard itself resolves to the first row, not past the end");
+}
+
+TEST(dashboard_activity_log_is_bounded_and_keeps_whole_lines) {
+	media::DashboardModel model;
+	checkEq(model.activityLog().size(), std::size_t{0}, "the log starts empty");
+
+	model.log("first");
+	model.log("second");
+	check(model.activityLog().find("first") != std::string::npos, "the first line is kept");
+	check(model.activityLog().find("second") != std::string::npos, "the second line is kept");
+	// An empty line is ignored rather than adding a blank row: "first\n" is six
+	// bytes and "second\n" is seven.
+	model.log("");
+	checkEq(model.activityLog().size(), std::size_t{13}, "an empty line adds nothing");
+
+	// A launcher stays up for days, so the log is capped. Whole lines are dropped
+	// from the front - trimming mid-line would leave a fragment at the top.
+	const std::string longLine(2048, 'x');
+	for (int i = 0; i < 40; ++i) {
+		model.log(longLine);
 	}
-	check(model.messageArea().y + model.messageArea().h
-			<= media::DashboardModel::kDefaultHeight + 0.5f,
-		"the message line sits inside the window");
+	check(model.activityLog().size() <= media::DashboardModel::kMaxLogBytes,
+		"the log stays under its byte cap");
+	check(!model.activityLog().empty(), "and is not emptied wholesale");
+	// Whatever survived must be whole lines: every line is either the long one or
+	// the two short ones, never a fragment of the long one.
+	check(model.activityLog().find(std::string(2048, 'x')) != std::string::npos
+			|| model.activityLog().size() < 2048,
+		"the surviving text is whole lines");
+
+	model.clearLog();
+	checkEq(model.activityLog().size(), std::size_t{0}, "clearLog empties it");
+}
+
+// ---------------------------------------------------------------------------
+// The Lua editor's non-visual half: tokenising, line indexing and the error
+// line. No window, no font, no ImGui - which is exactly why the editor's
+// interesting behaviour can be tested at all.
+// ---------------------------------------------------------------------------
+namespace {
+
+/// The kind of the span covering byte `offset` on `line`, for a compact
+/// assertion that reads as "this word is a keyword".
+media::ScriptTokenKind kindAt(const media::ScriptDocument& document,
+	std::size_t lineIndex, std::size_t offset) {
+	if (lineIndex >= document.lines().size()) {
+		return media::ScriptTokenKind::Plain;
+	}
+	for (const media::ScriptTokenSpan& span : document.lines()[lineIndex].spans) {
+		if (offset >= span.begin && offset < span.end) {
+			return span.kind;
+		}
+	}
+	return media::ScriptTokenKind::Plain;
+}
+
+} // namespace
+
+TEST(lua_tokenizer_classifies_the_things_that_matter) {
+	media::ScriptDocument document;
+	document.setText(
+		"local x = 42          -- a comment\n"
+		"controller.Log(\"hi\")\n"
+		"print('done')\n"
+		"if x ~= nil then return end\n");
+
+	// Four lines of source, plus the empty line a trailing newline produces -
+	// which is what an editor shows, and why the count is five.
+	checkEq(document.lineCount(), std::size_t{5}, "five lines are indexed");
+
+	// `local` is a keyword, `x` is plain, `42` is a number, the comment is a
+	// comment. Offsets are into the line, not the document.
+	check(kindAt(document, 0, 0) == media::ScriptTokenKind::Keyword, "'local' is a keyword");
+	check(kindAt(document, 0, 6) == media::ScriptTokenKind::Plain, "'x' is plain text");
+	check(kindAt(document, 0, 10) == media::ScriptTokenKind::Number, "'42' is a number");
+	check(kindAt(document, 0, 25) == media::ScriptTokenKind::Comment,
+		"the tail of the line is a comment");
+
+	// The two namespaces are coloured differently from each other and from the
+	// standard library, because calling the wrong one is a real mistake: a
+	// Player script has no `controller` and a Controller script has no `mp`.
+	check(kindAt(document, 1, 0) == media::ScriptTokenKind::Api,
+		"`controller` is host API");
+	check(kindAt(document, 1, 15) == media::ScriptTokenKind::String,
+		"a double-quoted string is a string");
+	check(kindAt(document, 2, 0) == media::ScriptTokenKind::Library,
+		"`print` is a standard library name");
+	check(kindAt(document, 2, 6) == media::ScriptTokenKind::String,
+		"a single-quoted string is a string");
+	check(kindAt(document, 3, 0) == media::ScriptTokenKind::Keyword, "'if' is a keyword");
+	// "if x ~= nil ...": i(0) f(1) space(2) x(3) space(4) ~(5) =(6)
+	check(kindAt(document, 3, 5) == media::ScriptTokenKind::Operator, "'~=' is an operator");
+	check(kindAt(document, 3, 8) == media::ScriptTokenKind::Keyword, "'nil' is a keyword");
+}
+
+TEST(lua_tokenizer_carries_long_comments_and_long_strings_across_lines) {
+	media::ScriptDocument document;
+	document.setText(
+		"--[[ this block\n"
+		"     keeps going\n"
+		"]] local a = 1\n");
+
+	checkEq(document.lineCount(), std::size_t{4}, "three lines plus the trailing empty one");
+	// Every byte of the first two lines is comment, including the delimiters.
+	check(kindAt(document, 0, 0) == media::ScriptTokenKind::Comment, "line 1 is comment");
+	check(kindAt(document, 1, 5) == media::ScriptTokenKind::Comment,
+		"the block continues onto line 2");
+	// And the state does not leak past the closing delimiter.
+	check(kindAt(document, 2, 3) == media::ScriptTokenKind::Keyword,
+		"code after the closing ]] is code again");
+
+	// A long string with a level: [==[ ... ]==]
+	media::ScriptDocument levelled;
+	levelled.setText("local s = [==[\nstill a string\n]==]\n");
+	check(kindAt(levelled, 0, 10) == media::ScriptTokenKind::String,
+		"a levelled long string opens");
+	check(kindAt(levelled, 1, 0) == media::ScriptTokenKind::String,
+		"and continues onto the next line");
+	check(kindAt(levelled, 2, 0) == media::ScriptTokenKind::String,
+		"the closing delimiter is part of the string");
+}
+
+TEST(lua_tokenizer_is_not_confused_by_a_quote_inside_a_comment) {
+	// The classic tokenizer bug: a `"` inside a comment must not open a string
+	// that swallows the rest of the file.
+	media::ScriptDocument document;
+	document.setText(
+		"-- he said \"hello\n"
+		"local value = 7\n");
+	check(kindAt(document, 1, 0) == media::ScriptTokenKind::Keyword,
+		"the line after a comment with a quote is tokenized normally");
+	check(kindAt(document, 1, 14) == media::ScriptTokenKind::Number,
+		"and its number is still a number");
+}
+
+TEST(script_document_indexes_lines_and_reports_the_caret_line) {
+	media::ScriptDocument document;
+	document.setText("one\ntwo\nthree\n");
+	checkEq(document.lineCount(), std::size_t{4},
+		"a trailing newline produces an empty final line, as an editor shows");
+
+	checkEq(document.lineForOffset(0), std::size_t{1}, "offset 0 is line 1");
+	checkEq(document.lineForOffset(2), std::size_t{1}, "the end of line 1 is still line 1");
+	checkEq(document.lineForOffset(4), std::size_t{2}, "the first byte of line 2 is line 2");
+	checkEq(document.lineForOffset(8), std::size_t{3}, "offset 8 is the start of line 3");
+	checkEq(document.lineForOffset(9999), std::size_t{4},
+		"an offset past the end clamps to the last line rather than running off it");
+
+	// An empty document still has one line, so a caret has somewhere to be.
+	media::ScriptDocument empty;
+	empty.setText("");
+	checkEq(empty.lineCount(), std::size_t{1}, "an empty document has one line");
+	checkEq(empty.lineForOffset(0), std::size_t{1}, "and its caret is on line 1");
+}
+
+TEST(script_document_refuses_text_lua_cannot_read) {
+	std::string error;
+
+	// A byte-order mark is a syntax error at the very first byte of a Lua 5.1
+	// chunk, and the message it produces does not say why. This is the single
+	// most common way a script pasted from an editor fails.
+	const std::string withBom = "\xEF\xBB\xBFprint('hi')\n";
+	check(!media::ScriptDocument::validateText(withBom, error),
+		"a UTF-8 byte-order mark is refused");
+	check(error.find("byte-order mark") != std::string::npos,
+		"and the reason names it, so the fix is obvious");
+
+	// A NUL cannot appear in a Lua source file.
+	const std::string withNul("print('a')\0print('b')", 19);
+	check(!media::ScriptDocument::validateText(withNul, error),
+		"a NUL byte is refused");
+
+	// Ordinary source, including UTF-8 in a string literal, is fine: Lua 5.1
+	// passes bytes through, and a script that prints an accented name is not a
+	// script with a problem.
+	check(media::ScriptDocument::validateText("print('\xC3\xA9')\n", error),
+		"UTF-8 inside a string literal is allowed, because Lua 5.1 allows it");
+	checkEqStr(error, "", "and leaves no error behind");
+}
+
+TEST(script_document_keeps_the_error_marker_on_the_right_line) {
+	media::ScriptDocument document;
+	document.setText("local a = 1\nlocal b = \nlocal c = 3\n");
+	checkEq(document.errorLine(), std::size_t{0}, "no error before one is reported");
+
+	document.setErrorLine(2, "unexpected symbol near '<eof>'");
+	checkEq(document.errorLine(), std::size_t{2}, "the error line is remembered");
+	check(document.lines()[1].error, "the second line is marked");
+	check(!document.lines()[0].error, "the first line is not");
+	check(!document.lines()[2].error, "the third line is not");
+	checkEqStr(document.lines()[1].errorText, "unexpected symbol near '<eof>'",
+		"the message is kept with the line");
+
+	// Re-tokenising must not lose the marker: editing around an error is exactly
+	// when the marker is most useful.
+	document.setText("local a = 1\nlocal b = \nlocal c = 3\n");
+	checkEq(document.errorLine(), std::size_t{2}, "the marker survives a re-tokenise");
+	check(document.lines()[1].error, "and is still on the same line");
+
+	document.clearError();
+	checkEq(document.errorLine(), std::size_t{0}, "clearError clears it");
+	check(!document.lines()[1].error, "and unmarks the line");
+
+	// An error the editor cannot place is still reported, just without a marker:
+	// dropping the message would hide a real failure.
+	document.setErrorLine(0, "compile failed with no line");
+	checkEq(document.errorLine(), std::size_t{0}, "a line-less error marks nothing");
+	checkEqStr(document.errorText(), "compile failed with no line",
+		"but the message is still kept for the status line");
+}
+
+TEST(lua_error_line_is_parsed_out_of_the_message) {
+	std::string message;
+
+	// The shape luaL_loadbuffer produces.
+	checkEq(media::parseLuaErrorLine("example.lua:12: 'end' expected (to close 'function' at line 3)",
+			message), 12, "the line is read from a syntax error");
+	checkEqStr(message, "'end' expected (to close 'function' at line 3)",
+		"and the chunk:line prefix is stripped");
+
+	// A path-shaped chunk name has colons of its own, which must not be mistaken
+	// for the line separator.
+	checkEq(media::parseLuaErrorLine("C:\\scripts\\x.lua:7: unexpected symbol", message), 7,
+		"a Windows path in the chunk name does not confuse the parse");
+	checkEqStr(message, "unexpected symbol", "and the message is clean");
+
+	// A runtime error carries a traceback; the first line is the useful one.
+	checkEq(media::parseLuaErrorLine("draft.lua:5: attempt to index a nil value\n"
+			"stack traceback:\n\t[C]: in function 'x'", message), 5,
+		"the line is read from a runtime error too");
+	checkEqStr(message, "attempt to index a nil value",
+		"and the traceback is dropped");
+
+	// Nothing to parse: the message is returned untouched rather than mangled.
+	checkEq(media::parseLuaErrorLine("something went wrong", message), 0,
+		"a message with no line reports no line");
+	checkEqStr(message, "something went wrong", "and is returned unchanged");
+	checkEq(media::parseLuaErrorLine("", message), 0, "an empty message is handled");
+}
+
+TEST(script_document_creates_and_saves_a_script_that_did_not_exist) {
+	// The round trip the Dashboard's editor depends on, against the real data
+	// directory. This is where the bug was: save() used load() as its containment
+	// check, so creating a NEW script failed with "cannot read ..." - the check
+	// insisted on reading the very file that was about to be created.
+	ScopedDataDir data(true);
+
+	media::ScriptDocument document;
+	std::string error;
+
+	check(!document.loaded(), "nothing is open to start with");
+	check(document.create("zz-created.lua", "\\controller-scripts", error),
+		"a script that does not exist yet can be created: " + error);
+	check(document.loaded(), "and the document now has a name");
+	checkEqStr(document.name(), "zz-created.lua", "the name is kept");
+
+	document.setText("-- written by the test\nlocal a = 1\nreturn a\n");
+	check(document.dirty(), "setting text marks the buffer dirty");
+
+	check(document.save(error), "the buffer saves: " + error);
+	check(!document.dirty(), "and saving clears the dirty flag");
+
+	// Read it back through a second document: this is what proves the bytes on
+	// disk are what the caller asked for, rather than that a write happened.
+	media::ScriptDocument reopened;
+	check(reopened.load("zz-created.lua", "\\controller-scripts", error),
+		"the script reads back: " + error);
+	checkEqStr(reopened.text(), "-- written by the test\nlocal a = 1\nreturn a\n",
+		"and the text is byte-for-byte what was written");
+	check(!reopened.dirty(), "a freshly loaded document is not dirty");
+
+	// A CRLF buffer is written as LF: Lua does not care, but two files that look
+	// identical in an editor should be identical on disk.
+	media::ScriptDocument crlf;
+	check(crlf.create("zz-crlf.lua", "\\controller-scripts", error), "second script created");
+	crlf.setText("local a = 1\r\nlocal b = 2\r\n");
+	check(crlf.save(error), "a CRLF buffer saves: " + error);
+	media::ScriptDocument crlfBack;
+	check(crlfBack.load("zz-crlf.lua", "\\controller-scripts", error), "and reads back");
+	check(crlfBack.text().find('\r') == std::string::npos,
+		"the carriage returns are not written to disk");
+
+	// The same containment rule on the create path, which is the one that writes.
+	media::ScriptDocument escaped;
+	check(!escaped.create("..\\evil.lua", "\\controller-scripts", error),
+		"creating a script outside the directory is refused");
+	check(!escaped.loaded(), "and nothing was adopted");
+	check(!escaped.create("sub/evil.lua", "\\controller-scripts", error),
+		"a name with a directory component is refused on create too");
+}
+
+TEST(script_document_refuses_to_load_a_name_that_is_a_path) {
+	media::ScriptDocument document;
+	std::string error;
+
+	// Containment: a bare .lua name only. These are the shapes an escape takes.
+	check(!document.load("..\\..\\Windows\\System32\\drivers\\etc\\hosts", "\\controller-scripts",
+		error), "a parent-relative name is refused");
+	check(!error.empty(), "and says why");
+	check(!document.load("C:\\Windows\\notepad.exe", "\\controller-scripts", error),
+		"an absolute path is refused");
+	check(!document.load("sub/dir.lua", "\\controller-scripts", error),
+		"a name with a directory component is refused");
+	check(!document.load("script.txt", "\\controller-scripts", error),
+		"a non-Lua extension is refused");
+	check(!document.load("", "\\controller-scripts", error), "an empty name is refused");
+	check(!document.loaded(), "none of the refusals left a document open");
 }
 
 TEST(controller_client_commands_reach_the_player_over_http) {
@@ -1637,7 +1945,7 @@ TEST(controller_client_commands_reach_the_player_over_http) {
 	// This test exists because that dispatch path is easy to get subtly wrong:
 	// `PlayerCommands::send` works by calling the virtual command methods, so a
 	// client whose `next()` calls back into `send()` recurses until the stack is
-	// gone -- a silent, instant death rather than a diagnosable failure.
+	// gone - a silent, instant death rather than a diagnosable failure.
 	//
 	// Every call goes through withServer(), which is what pumps the server's
 	// command queue: the queue only runs on the thread that calls poll(), so a
@@ -1905,59 +2213,33 @@ TEST(controller_corpus_panel_reports_the_folder_and_the_clip_count) {
 }
 
 // ---------------------------------------------------------------------------
-// dashboard_corpus_panel_is_laid_out_and_keeps_its_button_inside
+// dashboard_corpus_panel_reports_the_folder_and_the_count
 // ---------------------------------------------------------------------------
-TEST(dashboard_corpus_panel_is_laid_out_and_keeps_its_button_inside) {
+TEST(dashboard_corpus_panel_reports_the_folder_and_the_count) {
 	media::DashboardModel model;
-	model.setCorpus("D:\\Corpus", 0, false, "");
-	model.layout(static_cast<float>(media::DashboardModel::kDefaultWidth),
-		static_cast<float>(media::DashboardModel::kDefaultHeight));
 
-	const float windowW = static_cast<float>(media::DashboardModel::kDefaultWidth);
-	const float windowH = static_cast<float>(media::DashboardModel::kDefaultHeight);
+	// Nothing set and nothing running. The empty state must read as a normal
+	// first run, not as a failure: an unset corpus is what a fresh clone has.
+	check(!model.corpus().chosen(), "an unset corpus is not a chosen one");
+	checkEq(model.corpus().clipCount, std::size_t{0}, "there are no clips yet");
+	check(!model.corpus().playerOnline, "the Player is not up yet");
 
-	check(!model.corpus().card.empty(), "the corpus panel has been laid out");
-	check(model.corpus().card.x >= 0.0f, "the panel starts inside the window");
-	check(model.corpus().card.x + model.corpus().card.w <= windowW + 0.5f,
-		"the panel ends inside the window");
-	check(model.corpus().card.y + model.corpus().card.h <= windowH + 0.5f,
-		"the panel ends above the bottom edge");
-	check(model.corpus().chooseButton.x >= model.corpus().card.x,
-		"CHANGE... starts inside its panel");
-	check(model.corpus().chooseButton.x + model.corpus().chooseButton.w
-			<= model.corpus().card.x + model.corpus().card.w + 0.5f,
-		"CHANGE... ends inside its panel");
+	// A folder is set, and the Player is running and reading it.
+	model.setCorpus("D:\\Corpus", 12, true, "D:\\Corpus");
+	check(model.corpus().chosen(), "a set folder counts as chosen");
+	checkEqStr(model.corpus().folder, "D:\\Corpus", "the configured folder is kept");
+	checkEq(model.corpus().clipCount, std::size_t{12}, "the live count is kept");
+	check(model.corpus().playerOnline, "the Player is reported online");
+	checkEqStr(model.corpus().playerFolder, "D:\\Corpus",
+		"the folder the Player is actually reading is kept separately");
 
-	// It must not collide with the application rows above it.
-	for (const media::DashboardRow& row : model.rows()) {
-		check(row.card.y + row.card.h <= model.corpus().card.y + 0.5f,
-			"the corpus panel sits below every application row");
-	}
-	check(model.corpus().card.y + model.corpus().card.h
-			<= model.messageArea().y + 0.5f,
-		"the corpus panel sits above the message line");
-
-	// The button is live whether or not anything is running: choosing the
-	// folder is exactly what you do when nothing is.
-	check(model.hitTest(model.corpus().chooseButton.centreX(),
-		model.corpus().chooseButton.centreY()) == media::DashboardAction::ChooseMediaFolder,
-		"CHANGE... offers the folder action");
-
-	// And it still works at 2.4x, which is the 4K case that motivated the panel.
-	// The window grows with the scale, exactly as dashboard_main.cpp sizes it.
-	const float bigW = windowW * 2.4f;
-	const float bigH = windowH * 2.4f;
-	model.layout(bigW, bigH, 2.4f);
-	check(model.corpus().chooseButton.x + model.corpus().chooseButton.w
-			<= model.corpus().card.x + model.corpus().card.w + 0.5f,
-		"CHANGE... stays inside its panel at 2.4x");
-	check(model.corpus().card.y + model.corpus().card.h
-			<= model.messageArea().y + 0.5f,
-		"the panel stays above the message line at 2.4x");
-	check(model.corpus().card.x + model.corpus().card.w <= bigW + 0.5f,
-		"the panel stays inside a 2.4x window");
-	check(model.corpus().card.y + model.corpus().card.h <= bigH + 0.5f,
-		"the panel ends above the bottom edge at 2.4x");
+	// The two folders differ, which is the case the panel exists to make visible:
+	// someone edited mediabus.ini while a Player was already running.
+	model.setCorpus("D:\\NewCorpus", 0, true, "D:\\Corpus");
+	checkEqStr(model.corpus().folder, "D:\\NewCorpus", "the offered folder changed");
+	checkEqStr(model.corpus().playerFolder, "D:\\Corpus",
+		"the folder the Player is still reading did not");
+	check(!model.corpus().chosen() == false, "a non-empty folder is chosen");
 }
 
 // ---------------------------------------------------------------------------

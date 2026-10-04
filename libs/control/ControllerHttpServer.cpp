@@ -1,6 +1,7 @@
 #include "control/ControllerHttpServer.h"
 
 #include "control/LuaControllerScript.h"
+#include "control/ScriptDocument.h"
 #include "core/Log.h"
 #include "core/Platform.h"
 
@@ -58,7 +59,7 @@ Json stateJson(const ControllerState& state) {
 
 /// The directory scripts are discovered under, for the status payload.
 std::string scriptsRoot() {
-	return platform::dataDirectory() + "\\controller-scripts";
+	return platform::dataDirectory() + kControllerScriptsSubdirectory;
 }
 
 } // namespace
@@ -165,6 +166,64 @@ Json ControllerHttpServer::execute(ControllerHost host, int port, bool running,
 				return errorJson(error);
 			}
 			return Json{{"ok", true}, {"script", scripts->currentScript()}};
+		}
+
+		case Kind::ReadScript: {
+			// Read through ScriptDocument rather than through ifstream, so the
+			// containment rule ("a bare .lua name inside the scripts directory")
+			// has one implementation instead of one here and one in the editor.
+			ScriptDocument document;
+			std::string error;
+			if (!document.load(request.name, kControllerScriptsSubdirectory, error)) {
+				return errorJson(error);
+			}
+			return Json{{"ok", true},
+				{"name", document.name()},
+				{"text", document.text()},
+				{"bytes", document.text().size()}};
+		}
+
+		case Kind::ValidateScript: {
+			// Compile only. Nothing is executed and nothing is written, so a
+			// draft with a syntax error cannot disturb the running script.
+			std::size_t line = 0;
+			std::string error;
+			const bool ok = scripts->validateSource(request.text, request.name, line, error);
+			Json reply{{"ok", ok}};
+			if (!ok) {
+				reply["error"] = error;
+				reply["line"] = line;
+			}
+			return reply;
+		}
+
+		case Kind::SaveScript: {
+			// A script that does not compile is refused: the running one keeps
+			// working, and the operator is told which line to look at instead of
+			// discovering it when the reload silently does nothing.
+			std::size_t line = 0;
+			std::string compileError;
+			if (!scripts->validateSource(request.text, request.name, line, compileError)) {
+				Json reply = errorJson("the script does not compile: " + compileError);
+				reply["line"] = line;
+				return reply;
+			}
+
+			ScriptDocument document;
+			std::string error;
+			// create(), not load(): the file may not exist yet, and "make a new
+			// script" is exactly the case load() cannot serve. The containment
+			// check is the same one load() applies.
+			if (!document.create(request.name, kControllerScriptsSubdirectory, error)) {
+				return errorJson(error);
+			}
+			document.setText(request.text);
+			if (!document.save(error)) {
+				return errorJson(error);
+			}
+			return Json{{"ok", true},
+				{"name", document.name()},
+				{"bytes", request.text.size()}};
 		}
 
 		case Kind::Control:
@@ -327,6 +386,62 @@ bool ControllerHttpServer::start(int port) {
 		dispatch(res, request);
 	});
 
+	// --- the script-text routes, for the Dashboard's editor ----------------
+	//
+	// These are the only routes in either application that write a file, so the
+	// request shape is strict: a bare .lua name and, for the two POSTs, the whole
+	// text. The containment and the "does it compile" checks happen in execute()
+	// on the main thread, because that is where the Lua state lives.
+	server->Get("/api/controller/script-content", [guard, dispatch](
+		const httplib::Request& req, httplib::Response& res) {
+		if (!guard(req, res)) return;
+		const std::string name = req.has_param("name") ? req.get_param_value("name")
+			: std::string();
+		if (name.empty()) {
+			res.status = 400;
+			res.set_content(errorJson(
+				"expected ?name=x.lua (see GET /api/controller/scripts)").dump(),
+				"application/json");
+			return;
+		}
+		Request request;
+		request.kind = Kind::ReadScript;
+		request.name = name;
+		dispatch(res, request);
+	});
+
+	server->Post("/api/controller/validate", [guard, dispatch, parseBody](
+		const httplib::Request& req, httplib::Response& res) {
+		if (!guard(req, res)) return;
+		Json body;
+		if (!parseBody(req, res, body)) return;
+		Request request;
+		request.kind = Kind::ValidateScript;
+		request.name = body.value("name", std::string("draft.lua"));
+		request.text = body.value("text", std::string());
+		dispatch(res, request);
+	});
+
+	server->Post("/api/controller/script-save", [guard, dispatch, parseBody](
+		const httplib::Request& req, httplib::Response& res) {
+		if (!guard(req, res)) return;
+		Json body;
+		if (!parseBody(req, res, body)) return;
+		const std::string name = body.value("name", std::string());
+		if (name.empty()) {
+			res.status = 400;
+			res.set_content(errorJson(
+				"expected {\"name\":\"x.lua\",\"text\":\"...\"}").dump(),
+				"application/json");
+			return;
+		}
+		Request request;
+		request.kind = Kind::SaveScript;
+		request.name = name;
+		request.text = body.value("text", std::string());
+		dispatch(res, request);
+	});
+
 	server->Post("/api/controller/reload-script", [guard, dispatch](
 		const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
@@ -389,8 +504,10 @@ bool ControllerHttpServer::start(int port) {
 
 	LOG_NOTICE("ControllerApi") << "Controller API on http://127.0.0.1:" << port_;
 	LOG_NOTICE("ControllerApi") << "  GET  /api/controller/status | /api/controller/scripts";
+	LOG_NOTICE("ControllerApi") << "  GET  /api/controller/script-content?name=x.lua";
 	LOG_NOTICE("ControllerApi") << "  POST /api/controller/script | /api/controller/stop-script";
 	LOG_NOTICE("ControllerApi") << "  POST /api/controller/reload-script | /api/controller/command";
+	LOG_NOTICE("ControllerApi") << "  POST /api/controller/validate | /api/controller/script-save";
 	return true;
 }
 

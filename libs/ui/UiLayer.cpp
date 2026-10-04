@@ -314,16 +314,28 @@ void UiLayer::setUiScale(float scale) {
 	}
 	applyThemeToStyle();
 	ImGui::GetStyle().ScaleAllSizes(uiScale_);
-	// Font scaling is a separate factor in 1.92: ScaleAllSizes deliberately
-	// does not touch fonts. Setting both from the same number is what keeps a
-	// button's box and its label growing together.
+
+	// FontScaleMain is the operator's own size preference and is left alone.
+	//
+	// FontScaleDpi is 1.0, NOT uiScale_. The DPI factor is already baked into the
+	// size the font is rasterised at (see loadFonts: size = points * uiScale), so
+	// setting it here as well scaled the text TWICE - on a 150% display a 16pt
+	// font was rasterised at 24px and then drawn at 36px. That is why the
+	// interface looked zoomed: too large, and soft, because the raster had to be
+	// magnified to get there.
+	//
+	// There is exactly one place the DPI factor is applied, and it is the raster.
 	ImGui::GetStyle().FontScaleMain = 1.0f;
-	ImGui::GetStyle().FontScaleDpi = uiScale_;
-	if (fontsLoaded_) {
-		// The atlas holds glyphs rasterised at the base size; 1.92 rasterises
-		// on demand for other sizes, so nothing has to be rebuilt here.
-		loadFonts();
-	}
+	ImGui::GetStyle().FontScaleDpi = 1.0f;
+
+	// Load the fonts at the new scale, unconditionally.
+	//
+	// This used to be guarded by `if (fontsLoaded_)`, which is a deadlock: the
+	// only thing that ever loads a font is loadFonts(), and fontsLoaded_ is false
+	// until it has run once. The result was that no font was ever loaded unless a
+	// caller happened to call setFonts() first, so every window silently used
+	// Dear ImGui's built-in bitmap font while the log said nothing was wrong.
+	loadFonts();
 }
 
 void UiLayer::setFonts(const UiFonts& fonts) {
@@ -377,6 +389,12 @@ void UiLayer::loadFonts() {
 		if (uiFont != nullptr) {
 			fonts_.uiSource = uiPath;
 			fonts_.systemFontLoaded = true;
+		} else {
+			// The file is there and ImGui still refused it: a damaged or
+			// unsupported TTF. Say which file, because "the interface font looks
+			// wrong" is otherwise unactionable.
+			LOG_WARN("UI") << "ImGui could not rasterise " << uiPath
+				<< "; falling back to its built-in font";
 		}
 	}
 	if (uiFont == nullptr) {
@@ -407,6 +425,14 @@ void UiLayer::loadFonts() {
 	// pushed to the GPU here.
 	io.FontDefault = uiFont;
 	fontsLoaded_ = true;
+
+	// One line recording what was actually resolved. Without it, "the text looks
+	// wrong" has no starting point: this says which file was used, which was
+	// looked for, and at what pixel size.
+	LOG_NOTICE("UI") << "fonts: ui='" << (uiPath.empty() ? "(none found)" : uiPath)
+		<< "' @ " << uiPixels << "px, mono='"
+		<< (monoPath.empty() ? "(none found)" : monoPath) << "' @ " << monoPixels
+		<< "px, uiScale " << uiScale_;
 }
 
 void UiLayer::setIniPath(std::string path) {

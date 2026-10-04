@@ -69,17 +69,25 @@ struct Options {
 	std::string script;
 };
 
-/// The panel's default window size, in logical points at 100% scaling. Wider
-/// and taller than the old strip: with real widgets there is room to show the
-/// volume, the speed, the clip identity and the script state at once, instead of
-/// packing them into one row of hand-measured rectangles.
-constexpr int kDefaultWidth = 1040;
-constexpr int kDefaultHeight = 300;
+/// The panel's window size, in pixels.
+///
+/// These are the real pixel dimensions of the framebuffer, NOT a size that is
+/// then multiplied by the DPI factor. The DPI factor belongs to the FONT and is
+/// applied once, when the font is rasterised (see UiLayer::loadFonts); the text
+/// is already bigger on a dense display, so scaling the window as well grew it
+/// twice and left the whole interface looking zoomed.
+///
+/// The numbers come from what is actually in the panel, measured rather than
+/// guessed: four transport buttons at 84pt each, then the HUD, Fullscreen and
+/// Subtitles checkboxes, the two sliders, the seek bar with its readouts, the
+/// folder field with its Change button, and the script strip. At 1100 the
+/// Fullscreen checkbox was cut off at the right edge.
+constexpr int kDefaultWidth = 1240;
+constexpr int kDefaultHeight = 560;
 
-/// Smallest window that still shows the whole transport row and the seek bar.
-/// Below this ImGui would scroll, which for a control panel reads as a bug.
-constexpr int kMinimumWidth = 720;
-constexpr int kMinimumHeight = 220;
+/// Below this the transport row or the folder field would be clipped.
+constexpr int kMinimumWidth = 900;
+constexpr int kMinimumHeight = 320;
 
 void printUsage() {
 	std::printf(
@@ -87,8 +95,8 @@ void printUsage() {
 		"\n"
 		"Usage: vn-mediabus-controller.exe [options]\n"
 		"\n"
-		"  --width N            panel width  (default %d logical points)\n"
-		"  --height N           panel height (default %d logical points)\n"
+		"  --width N            panel width  (default %d pixels)\n"
+		"  --height N           panel height (default %d pixels)\n"
 		"  --player-host HOST   where the Player API is (default 127.0.0.1)\n"
 		"  --player-port N      Player API port (default %d)\n"
 		"  --api-port N         this Controller's own API port (default %d)\n"
@@ -182,6 +190,56 @@ void onGlfwError(int code, const char* description) {
 	LOG_ERROR("GLFW") << code << ": " << description;
 }
 
+/// Ask for a window whose FRAMEBUFFER is `wantW` x `wantH` physical pixels.
+///
+/// Everything that draws works in framebuffer pixels: ImGui's DisplaySize, the
+/// GL viewport, and the layout itself. But glfwCreateWindow takes SCREEN
+/// COORDINATES, so on a display at 150% scaling a request for 1240 produces a
+/// 1860-pixel framebuffer. Asking for the layout size directly therefore made the
+/// interface one content-scale larger than intended - the zoom this exists to
+/// correct.
+///
+/// This verifies the result instead of assuming it. GLFW does not promise that a
+/// requested window size and the framebuffer it produces agree on every platform
+/// and DPI setting, and a mismatch here is otherwise invisible from inside the
+/// application.
+bool syncWindowToFramebuffer(GLFWwindow* window, int wantW, int wantH) {
+	int fbW = 0;
+	int fbH = 0;
+	glfwGetFramebufferSize(window, &fbW, &fbH);
+	if (fbW == wantW && fbH == wantH) {
+		return true;
+	}
+	int winW = 0;
+	int winH = 0;
+	glfwGetWindowSize(window, &winW, &winH);
+	if (fbW <= 0 || fbH <= 0 || winW <= 0 || winH <= 0) {
+		LOG_WARN("Controller") << "no usable window or framebuffer size; "
+			"laying out for " << fbW << "x" << fbH;
+		return false;
+	}
+
+	// The relationship between the two is linear, so one correction lands on the
+	// target whatever is doing the scaling.
+	const int targetW = std::max(1, static_cast<int>(
+		static_cast<float>(winW) * (static_cast<float>(wantW) / static_cast<float>(fbW)) + 0.5f));
+	const int targetH = std::max(1, static_cast<int>(
+		static_cast<float>(winH) * (static_cast<float>(wantH) / static_cast<float>(fbH)) + 0.5f));
+	glfwSetWindowSize(window, targetW, targetH);
+	glfwGetFramebufferSize(window, &fbW, &fbH);
+	if (fbW == wantW && fbH == wantH) {
+		LOG_NOTICE("Controller") << "window resized to " << targetW << "x" << targetH
+			<< " to get a " << fbW << "x" << fbH << " framebuffer";
+		return true;
+	}
+	// Not fatal - the layout adapts to whatever it is given - but it means the
+	// display is doing something this code did not anticipate, so say so.
+	LOG_WARN("Controller") << "framebuffer is " << fbW << "x" << fbH
+		<< ", not the requested " << wantW << "x" << wantH
+		<< "; the panel will be laid out for the size it really has";
+	return false;
+}
+
 /// Physical size of the window on screen, in real device pixels.
 ///
 /// This is the number that decides whether text is readable, and it is not the
@@ -260,13 +318,20 @@ int main(int argc, char** argv) {
 	glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
 	glfwWindowHint(GLFW_SAMPLES, 0);
 
-	// GLFW's window size is in DPI-virtualized screen coordinates while the
-	// layout is in framebuffer pixels, so the size is scaled by the same factor
-	// the widgets are. See core/UiScale.h.
-	const int wantW = static_cast<int>(
-		static_cast<float>(options.width) * uiScale + 0.5f);
-	const int wantH = static_cast<int>(
-		static_cast<float>(options.height) * uiScale + 0.5f);
+	// The window is asked for in SCREEN COORDINATES, and the framebuffer it
+	// produces is that size times the monitor's content scale - so on a 150%
+	// display, asking for 1240 gives a 1860-pixel framebuffer. The layout and the
+	// fonts are both measured in FRAMEBUFFER pixels, so asking for the layout size
+	// directly made everything that much larger again: that is the zoom the
+	// division below removes.
+	//
+	// The result is verified rather than assumed (see syncWindowToFramebuffer):
+	// GLFW does not promise the two sizes agree on every platform and DPI setting,
+	// and a mismatch is otherwise invisible from inside the application.
+	int wantW = std::max(1, static_cast<int>(
+		static_cast<float>(options.width) / uiScale + 0.5f));
+	int wantH = std::max(1, static_cast<int>(
+		static_cast<float>(options.height) / uiScale + 0.5f));
 
 	gWindow = glfwCreateWindow(wantW, wantH, "vn-mediabus controller", nullptr, nullptr);
 	if (gWindow == nullptr) {
@@ -294,6 +359,10 @@ int main(int argc, char** argv) {
 		glfwTerminate();
 		return 1;
 	}
+	// Correct the framebuffer to the size the layout was written for, now that
+	// there is a window to measure. The layout and the font sizes are both in
+	// framebuffer pixels, so this is what decides how large the panel really is.
+	syncWindowToFramebuffer(gWindow, options.width, options.height);
 	ui->setUiScale(uiScale);
 	ui->setIniPath(media::platform::executableDirectory() + "mediabus-ui.ini");
 	ui->installCallbacks();

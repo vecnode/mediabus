@@ -45,15 +45,50 @@ std::string clock(double seconds) {
 	return buffer;
 }
 
-/// Right-align the next item inside the current window, when there is room.
-/// Used for the status endpoint, the duration and the button groups: without it
-/// every row would be left-packed and the window would look unfinished at any
-/// width wider than its contents.
-void alignRight(float itemWidth) {
-	const float target = ImGui::GetWindowWidth() - itemWidth
-		- ImGui::GetStyle().WindowPadding.x;
-	if (ImGui::GetCursorPosX() < target) {
-		ImGui::SetCursorPosX(target);
+/// Begin a row whose first cell takes what it needs and whose second cell is
+/// pinned to the right edge.
+///
+/// This exists because the obvious approach - SetCursorPosX() out to the right
+/// edge - is exactly what Dear ImGui refuses to do: it extends the window's
+/// content rectangle and logs an "extend window/parent boundaries" error every
+/// frame, which is what it did before this was rewritten. A two-column table is
+/// the supported way to say "this belongs at the right edge".
+void beginRightAlignedRow(const char* id) {
+	ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(0.0f, 0.0f));
+	if (ImGui::BeginTable(id, 2, ImGuiTableFlags_SizingStretchProp)) {
+		ImGui::TableSetupColumn("left", ImGuiTableColumnFlags_WidthFixed);
+		ImGui::TableSetupColumn("right", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableNextRow();
+		ImGui::TableSetColumnIndex(0);
+	}
+}
+
+/// End a row started by beginRightAlignedRow(). `drawRight` runs with the cursor
+/// already at the start of the right-hand cell.
+template <typename Fn>
+void endRightAlignedRow(Fn&& drawRight) {
+	if (ImGui::TableSetColumnIndex(1)) {
+		drawRight();
+	}
+	ImGui::EndTable();
+	ImGui::PopStyleVar();
+}
+
+/// Move to the right of `trailingWidth` worth of empty space, so the next item
+/// ends near the right edge of the current row.
+///
+/// This is the single-line counterpart of the table above, for rows where a whole
+/// table would be heavier than the row deserves. SameLine() with an offset is
+/// deliberately used instead of SetCursorPosX(): the offset is measured from
+/// where the line already is, so it never asks for space the line does not have,
+/// and an item that does not fit simply wraps rather than logging an error.
+void sameLineRight(float trailingWidth) {
+	const float room = ImGui::GetContentRegionAvail().x;
+	const float offset = room - trailingWidth;
+	if (offset > 0.0f) {
+		ImGui::SameLine(0.0f, offset);
+	} else {
+		ImGui::SameLine();
 	}
 }
 
@@ -103,16 +138,6 @@ ControllerPanel::Frame ControllerPanel::draw(ui::UiLayer& ui, const ControllerMo
 	drawSeek(model, frame);
 	drawCorpus(model, frame);
 	drawScripts(model, scriptName, scriptError, scriptRunning, frame);
-
-	// The message strip is pinned to the bottom rather than left where it lands:
-	// it is the line an operator reads when something was refused, so it must
-	// not move around.
-	const float stripHeight = ImGui::GetTextLineHeightWithSpacing() * 1.8f;
-	const float bottom = ImGui::GetWindowHeight() - stripHeight
-		- ImGui::GetStyle().WindowPadding.y;
-	if (ImGui::GetCursorPosY() < bottom) {
-		ImGui::SetCursorPosY(bottom);
-	}
 	drawMessage(model);
 
 	// Esc closes the window, as it did before the interface changed. ImGui owns
@@ -141,8 +166,7 @@ void ControllerPanel::drawStatusRow(const ControllerModel& model) {
 	ImGui::TextUnformatted(title.c_str());
 
 	if (!playerEndpoint_.empty()) {
-		ImGui::SameLine();
-		alignRight(ImGui::CalcTextSize(playerEndpoint_.c_str()).x);
+		sameLineRight(ImGui::CalcTextSize(playerEndpoint_.c_str()).x);
 		ImGui::TextDisabled("%s", playerEndpoint_.c_str());
 	}
 }
@@ -184,25 +208,34 @@ void ControllerPanel::drawTransport(ControllerModel& model, Frame& frame) {
 		if (!enabled) {
 			ImGui::EndDisabled();
 		}
-		if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+		// Only a button that can actually be pressed gets a tooltip. Without the
+		// `enabled` half, a disabled button still pops its tooltip when the
+		// pointer happens to be over it - and because the pointer does not move,
+		// that tooltip stays on screen and ends up in a screenshot.
+		if (enabled && ImGui::IsItemHovered()) {
 			ImGui::SetTooltip("%s", spec.tooltip);
 		}
 	}
 
-	// The three Player toggles as labelled checkboxes. The Player's protocol
-	// carries each as an absolute boolean, so the checkbox shows the truth and a
-	// click sends the opposite.
-	ImGui::SameLine();
-	ImGui::Dummy(ImVec2(ImGui::GetStyle().ItemSpacing.x * 2.0f, 0.0f));
-	ImGui::SameLine();
-
+	// The three Player toggles as labelled checkboxes, on their own row.
+	//
+	// They used to share the line with the transport buttons, which does not fit:
+	// four buttons plus three labelled checkboxes plus both sliders overran the
+	// window and the last checkbox was cut off. Giving the toggles their own row
+	// is what makes the whole panel visible at its default size rather than only
+	// when it is dragged wider.
 	struct ToggleSpec { ControlCommand command; const char* label; bool on; };
 	const ToggleSpec toggles[] = {
 		{ControlCommand::ToggleHud, "HUD", s.hudVisible},
 		{ControlCommand::ToggleFullscreen, "Fullscreen", s.fullscreen},
 		{ControlCommand::ToggleSubtitles, "Subtitles", s.subtitlesEnabled},
 	};
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextDisabled("Playback");
+	ImGui::SameLine();
+	ImGui::Dummy(ImVec2(ImGui::GetStyle().ItemSpacing.x, 0.0f));
 	for (const ToggleSpec& toggle : toggles) {
+		ImGui::SameLine();
 		if (!s.online) {
 			ImGui::BeginDisabled();
 		}
@@ -214,7 +247,6 @@ void ControllerPanel::drawTransport(ControllerModel& model, Frame& frame) {
 		if (!s.online) {
 			ImGui::EndDisabled();
 		}
-		ImGui::SameLine();
 	}
 
 	// --- volume and speed ---------------------------------------------------
@@ -231,6 +263,9 @@ void ControllerPanel::drawTransport(ControllerModel& model, Frame& frame) {
 	if (volumeDraft_ < 0.0) {
 		volumeDraft_ = s.volume;
 	}
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextDisabled("Volume");
+	ImGui::SameLine();
 	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
 	ImGui::SliderScalar("##volume", ImGuiDataType_Double, &volumeDraft_, &zero, &hundred,
 		"vol %.0f%%", ImGuiSliderFlags_AlwaysClamp);
@@ -251,6 +286,9 @@ void ControllerPanel::drawTransport(ControllerModel& model, Frame& frame) {
 	if (speedDraft_ < 0.0) {
 		speedDraft_ = s.speed;
 	}
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextDisabled("Speed");
+	ImGui::SameLine();
 	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
 	ImGui::SliderScalar("##speed", ImGuiDataType_Double, &speedDraft_, &slowest, &fastest,
 		"%.2fx", ImGuiSliderFlags_AlwaysClamp);
@@ -305,8 +343,7 @@ void ControllerPanel::drawSeek(const ControllerModel& model, Frame& frame) {
 	const std::string total = (active && s.duration > 0.0) ? clock(s.duration)
 		: std::string("--:--");
 	ImGui::TextDisabled("%s", elapsed.c_str());
-	ImGui::SameLine();
-	alignRight(ImGui::CalcTextSize(total.c_str()).x);
+	sameLineRight(ImGui::CalcTextSize(total.c_str()).x);
 	ImGui::TextDisabled("%s", total.c_str());
 
 	// A still image is the one case worth explaining: without this, a disabled
@@ -340,8 +377,7 @@ void ControllerPanel::drawCorpus(const ControllerModel& model, Frame& frame) {
 		}
 	}
 
-	ImGui::SameLine();
-	alignRight(buttonWidth);
+	sameLineRight(buttonWidth);
 	if (ImGui::Button("Change...", ImVec2(buttonWidth, 0.0f))) {
 		frame.action.valid = true;
 		frame.action.chooseFolder = true;
@@ -374,8 +410,7 @@ void ControllerPanel::drawScripts(const ControllerModel& model,
 	}
 
 	const float buttonWidth = ImGui::GetFontSize() * 5.0f;
-	ImGui::SameLine();
-	alignRight(buttonWidth * 2.0f + ImGui::GetStyle().ItemSpacing.x);
+	sameLineRight(buttonWidth * 2.0f + ImGui::GetStyle().ItemSpacing.x);
 	ImGui::BeginDisabled(scriptName.empty());
 	if (ImGui::Button("Reload", ImVec2(buttonWidth, 0.0f))) {
 		frame.action.valid = true;

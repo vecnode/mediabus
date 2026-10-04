@@ -1,5 +1,6 @@
 #include "control/LuaControllerScript.h"
 
+#include "control/ScriptDocument.h"
 #include "core/Log.h"
 #include "core/Platform.h"
 
@@ -453,6 +454,42 @@ bool LuaControllerScript::runSource(const std::string& source,
 	}
 	error.clear();
 	return true;
+}
+
+bool LuaControllerScript::validateSource(const std::string& source,
+	const std::string& chunkName, std::size_t& errorLine, std::string& error) const {
+	errorLine = 0;
+	error.clear();
+	if (lua_ == nullptr) {
+		error = "scripting is not available";
+		return false;
+	}
+
+	// luaL_loadbuffer compiles the chunk and pushes the resulting function (or
+	// the error message) onto the stack. It runs nothing. The function it leaves
+	// behind is popped either way, so a validate cannot leak a stack slot into
+	// the running script - which matters because this is called from the HTTP
+	// command queue while a script may be mid-tick.
+	const int status = luaL_loadbuffer(lua_, source.c_str(), source.size(),
+		chunkName.c_str());
+	if (status == kLuaOk) {
+		lua_pop(lua_, 1);
+		return true;
+	}
+
+	const std::string raw = luaErrorText(lua_, chunkName);
+	lua_pop(lua_, 1);
+
+	int line = 0;
+	std::string message;
+	// Lua's syntax errors read `<chunk>:<line>: <message>`, which is exactly the
+	// shape parseLuaErrorLine understands. It lives in ScriptDocument.cpp with
+	// the rest of the text handling, so the parse is shared rather than
+	// duplicated here.
+	line = parseLuaErrorLine(raw, message);
+	errorLine = line > 0 ? static_cast<std::size_t>(line) : 0;
+	error = message.empty() ? raw : message;
+	return false;
 }
 
 bool LuaControllerScript::runFile(const std::string& path, std::string& error) {

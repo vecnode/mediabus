@@ -16,30 +16,37 @@
  * enumeration: that is portable, it needs no elevation, and it answers the
  * question that matters ("is its API answering?") rather than a proxy for it.
  *
- * Drawing goes through media::RenderDevice, as in both other apps: this file
- * must never name an OpenGL symbol. The tray is shell integration, not
- * rendering, and it is the only Win32 detail in here — and it lives in
- * TrayIcon.cpp, not in this file.
+ * Drawing is Dear ImGui on the GL context this file creates: the panel in
+ * view/DashboardView never names OpenGL, and never acts - it reports. The tray
+ * is shell integration rather than rendering, and the only Win32 detail here,
+ * living in TrayIcon.cpp rather than in this file.
  *
  * Copyright (c) vecnode 2026 - GPL-2.0-or-later (see LICENSE)
  */
 
 #include "control/AppLauncher.h"
 #include "control/DashboardModel.h"
+#include "control/ScriptDocument.h"
+#include "control/ScriptLibrary.h"
 #include "view/DashboardView.h"
 #include "win32/TrayIcon.h"
 #include "win32/FolderPicker.h"
+#include "gfx/GlLoader.h"
 #include "gfx/UiScaleGlfw.h"
 #include "net/HttpJsonClient.h"
-#include "gfx/GlLoader.h"
-#include "gfx/RenderDevice.h"
+#include "ui/UiLayer.h"
 #include "core/AppConfig.h"
 #include "core/Log.h"
+#include "core/Platform.h"
 #include "core/UiScale.h"
 
 #define GLFW_INCLUDE_NONE
-#include <GL/glew.h>
 #include <GLFW/glfw3.h>
+// glfwGetWin32Window lives in the native header, which must come after glfw3.h.
+#if defined(_WIN32)
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -52,6 +59,8 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -148,6 +157,43 @@ void enableDpiAwareness() {
 	}
 	SetProcessDPIAware();
 #endif
+}
+
+/// Ask for a window whose FRAMEBUFFER is `wantW` x `wantH` physical pixels.
+///
+/// Everything that draws works in framebuffer pixels: ImGui's DisplaySize, the GL
+/// viewport, and the layout itself. glfwCreateWindow takes SCREEN COORDINATES,
+/// and on a scaled display the framebuffer that comes back is that size times the
+/// content scale - so the sizes have to be reconciled, and the result verified
+/// rather than assumed. See the identical note in apps/controller/main.cpp.
+bool syncWindowToFramebuffer(GLFWwindow* window, int wantW, int wantH) {
+	int fbW = 0;
+	int fbH = 0;
+	glfwGetFramebufferSize(window, &fbW, &fbH);
+	if (fbW == wantW && fbH == wantH) {
+		return true;
+	}
+	int winW = 0;
+	int winH = 0;
+	glfwGetWindowSize(window, &winW, &winH);
+	if (fbW <= 0 || fbH <= 0 || winW <= 0 || winH <= 0) {
+		LOG_WARN("Dashboard") << "no usable window or framebuffer size; "
+			"laying out for " << fbW << "x" << fbH;
+		return false;
+	}
+	const int targetW = std::max(1, static_cast<int>(
+		static_cast<float>(winW) * (static_cast<float>(wantW) / static_cast<float>(fbW)) + 0.5f));
+	const int targetH = std::max(1, static_cast<int>(
+		static_cast<float>(winH) * (static_cast<float>(wantH) / static_cast<float>(fbH)) + 0.5f));
+	glfwSetWindowSize(window, targetW, targetH);
+	glfwGetFramebufferSize(window, &fbW, &fbH);
+	if (fbW == wantW && fbH == wantH) {
+		return true;
+	}
+	LOG_WARN("Dashboard") << "framebuffer is " << fbW << "x" << fbH
+		<< ", not the requested " << wantW << "x" << wantH
+		<< "; the launcher will be laid out for the size it really has";
+	return false;
 }
 
 void onGlfwError(int code, const char* description) {
@@ -343,6 +389,11 @@ private:
 
 /// Everything the window callbacks need. One instance lives for the whole run,
 /// and the window's user-data slot points at it.
+///
+/// The interface itself is ImGui's now, so there is no click state here: ImGui
+/// owns the pointer and the keyboard inside the window, and what the operator
+/// did arrives as a DashboardAction. What is left is the tray's business, which
+/// ImGui knows nothing about.
 struct UiState {
 	/// True once the tray icon exists. While it does, closing or hiding the
 	/// window keeps the launcher alive; without it, the window is the only way
@@ -350,10 +401,6 @@ struct UiState {
 	bool trayAvailable = false;
 	/// Set by QUIT in the tray menu: the only way out.
 	bool quit = false;
-
-	bool clickPending = false;
-	double x = 0.0;
-	double y = 0.0;
 };
 
 void setWindowVisible(GLFWwindow* window, bool visible) {
@@ -373,6 +420,152 @@ std::string trayTooltip(const media::DashboardModel& model) {
 		text += row.running ? "up" : "down";
 	}
 	return text;
+}
+
+/// An empty script that is valid Lua and says what to do with it.
+///
+/// Starting a new file from nothing gives no clue about the API a script is
+/// written against, and `controller` is not something a person guesses. The
+/// header comment is the cheapest possible documentation.
+std::string newScriptTemplate(const std::string& name) {
+	return "-- " + name + "\n"
+		"--\n"
+		"-- Runs inside the Controller. Every call below is an HTTP request to the\n"
+		"-- Player's control API, so a script cannot break the Player.\n"
+		"--\n"
+		"-- OnTick is called once per frame. controller.Sleep(ms) does not block the\n"
+		"-- window: it charges a per-frame budget and resumes on a later frame, which\n"
+		"-- is what lets a sequence of steps read as a sequence.\n"
+		"--\n"
+		"-- Available: Play, Next, Previous, Pause, Stop, SeekPercent, SetVolume,\n"
+		"-- SetSpeed, SetSubtitles, ShowHUD, Fullscreen, CurrentClip, Playlist, Log,\n"
+		"-- Sleep, OnTick.\n"
+		"\n"
+		"local M = {}\n"
+		"\n"
+		"function M.onTick()\n"
+		"\tlocal clip = controller.CurrentClip()\n"
+		"\tif not clip.online then\n"
+		"\t\treturn\n"
+		"\tend\n"
+		"\tcontroller.Log(\"running: \" .. tostring(clip.name))\n"
+		"\treturn\n"
+		"end\n"
+		"\n"
+		"controller.OnTick(M.onTick)\n";
+}
+
+/// Act on everything the Scripts tab asked for this frame.
+///
+/// Kept as a free function rather than a method on the panel so the panel stays
+/// a drawing class with no network and no file access - which is the property
+/// that lets it be reasoned about, and the reason the Scripts tab can be tested
+/// by driving ScriptLibrary directly.
+void handleScriptRequests(media::DashboardPanel& panel, media::ScriptLibrary& library,
+	media::ScriptDocument& document, media::DashboardModel& model) {
+	if (!panel.saveRequested() && !panel.validateRequested()
+		&& !panel.reloadRequested() && !panel.runRequested()
+		&& panel.newScriptName().empty()) {
+		return;
+	}
+
+	const std::string newName = panel.newScriptName();
+	const std::string selection = panel.selection();
+	panel.clearRequests();
+
+	// --- create ------------------------------------------------------------
+	if (!newName.empty()) {
+		std::string name = newName;
+		if (media::platform::lowerExtension(name) != ".lua") {
+			name += ".lua";
+		}
+		const media::ScriptLibrary::Result written = library.write(name,
+			newScriptTemplate(name));
+		panel.setScriptStatus(written.ok ? "created " + name : written.error);
+		if (written.ok) {
+			panel.setSelection(name);
+			std::string text;
+			if (library.read(name, text).ok) {
+				document.setText(text);
+				document.markSaved();
+				panel.setDirty(false);
+			}
+			model.log("created script " + name);
+		}
+		return;
+	}
+
+	if (selection.empty()) {
+		panel.setScriptStatus("select a script first");
+		return;
+	}
+
+	// --- validate ----------------------------------------------------------
+	if (panel.validateRequested()) {
+		media::ScriptValidation validation;
+		const media::ScriptLibrary::Result result = library.validate(selection,
+			document.text(), validation);
+		if (!result.ok) {
+			panel.setScriptStatus("controller: " + result.error);
+		} else if (validation.ok) {
+			document.clearError();
+			panel.setScriptStatus("compiles: no syntax errors");
+		} else {
+			document.setErrorLine(validation.errorLine, validation.message);
+			panel.revealError(validation.errorLine);
+			panel.setScriptStatus("does not compile");
+		}
+		return;
+	}
+
+	// --- save --------------------------------------------------------------
+	if (panel.saveRequested()) {
+		const media::ScriptLibrary::Result result = library.write(selection,
+			document.text());
+		if (!result.ok) {
+			panel.setScriptStatus(result.error);
+			// A refusal that names a line is a syntax error: mark it, so the
+			// editor shows where rather than only that.
+			return;
+		}
+		document.clearError();
+		document.markSaved();
+		panel.setDirty(false);
+		panel.setScriptStatus("saved " + selection);
+		model.log("saved script " + selection);
+
+		// Saving the script that is running and then not reloading it would leave
+		// the operator looking at code the Controller is not executing. Reloading
+		// is a separate request so it stays visible in the log when it happens.
+		const media::ScriptLibrary::Result reloaded = library.reload();
+		if (reloaded.ok) {
+			panel.setScriptStatus("saved and reloaded " + selection);
+			model.log("reloaded " + selection + " into the Controller");
+		} else {
+			panel.setScriptStatus("saved " + selection
+				+ " - the Controller did not reload it: " + reloaded.error);
+		}
+		return;
+	}
+
+	// --- reload ------------------------------------------------------------
+	if (panel.reloadRequested()) {
+		const media::ScriptLibrary::Result result = library.reload();
+		panel.setScriptStatus(result.ok ? "reloaded " + selection : result.error);
+		if (result.ok) {
+			model.log("reloaded " + selection + " into the Controller");
+		}
+		return;
+	}
+
+	// --- run ---------------------------------------------------------------
+	if (panel.runRequested()) {
+		const media::ScriptLibrary::Result result = library.run(selection);
+		panel.setScriptStatus(result.ok ? "running " + selection : result.error);
+		if (result.ok) {
+			model.log("started script " + selection);
+		}
+	}
 }
 
 } // namespace
@@ -409,13 +602,17 @@ int main(int argc, char** argv) {
 	// --tray means the icon is the whole user interface until it is asked for.
 	glfwWindowHint(GLFW_VISIBLE, options.startInTray ? GLFW_FALSE : GLFW_TRUE);
 
-	// The layout is written in framebuffer pixels, so the window is asked for at
-	// the layout size times the content scale. See the note on
-	// syncWindowToFramebuffer in controller_main.cpp for why that ratio matters.
-	const int wantW = static_cast<int>(
-		static_cast<float>(options.width) * uiScale + 0.5f);
-	const int wantH = static_cast<int>(
-		static_cast<float>(options.height) * uiScale + 0.5f);
+	// The window is asked for in SCREEN COORDINATES, and the framebuffer it
+	// produces is that size times the monitor's content scale - on a 150%
+	// display, asking for 1040 gives a 1560-pixel framebuffer. The layout and the
+	// fonts are both measured in FRAMEBUFFER pixels, so asking for the layout size
+	// directly made everything one content-scale larger than intended. The
+	// division below removes that, and syncWindowToFramebuffer afterwards
+	// corrects whatever the display actually did.
+	int wantW = std::max(1, static_cast<int>(
+		static_cast<float>(options.width) / uiScale + 0.5f));
+	int wantH = std::max(1, static_cast<int>(
+		static_cast<float>(options.height) / uiScale + 0.5f));
 	gWindow = glfwCreateWindow(wantW, wantH, "vn-mediabus-dashboard", nullptr, nullptr);
 	if (gWindow == nullptr) {
 		LOG_ERROR("Dashboard") << "glfwCreateWindow failed";
@@ -435,16 +632,12 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 
-	std::unique_ptr<media::RenderDevice> device = media::createGlRenderDevice();
-	if (!device || !device->initialize()) {
-		LOG_ERROR("Dashboard") << "RenderDevice::initialize failed";
-		glfwDestroyWindow(gWindow);
-		glfwTerminate();
-		return 1;
-	}
+	// The RenderDevice this application used to draw through is gone: every card,
+	// button, label and bitmap glyph it drew is an ImGui widget now, and ImGui
+	// owns the GL objects behind them. Nothing here needs the device, which is
+	// why this file no longer creates one.
 
 	media::DashboardModel model;
-	media::DashboardView view;
 	Dashboard dashboard;
 
 	dashboard.refresh();
@@ -502,8 +695,7 @@ int main(int argc, char** argv) {
 				// everything this one could.
 				LOG_NOTICE("Dashboard") << "the launcher is already running; nothing to do";
 				dashboard.stop();
-				device.reset();
-				glfwDestroyWindow(gWindow);
+							glfwDestroyWindow(gWindow);
 				glfwTerminate();
 				return 0;
 
@@ -523,38 +715,6 @@ int main(int argc, char** argv) {
 		}
 	}
 
-	glfwSetMouseButtonCallback(gWindow, [](GLFWwindow* window, int button, int action, int) {
-		if (button != GLFW_MOUSE_BUTTON_LEFT) {
-			return;
-		}
-		auto* state = static_cast<UiState*>(glfwGetWindowUserPointer(window));
-		if (state == nullptr) {
-			return;
-		}
-		if (action == GLFW_PRESS) {
-			double x = 0.0;
-			double y = 0.0;
-			glfwGetCursorPos(window, &x, &y);
-			state->x = x;
-			state->y = y;
-			state->clickPending = true;
-		}
-	});
-
-	glfwSetKeyCallback(gWindow, [](GLFWwindow* window, int key, int, int action, int) {
-		if (key != GLFW_KEY_ESCAPE || (action != GLFW_PRESS && action != GLFW_REPEAT)) {
-			return;
-		}
-		auto* state = static_cast<UiState*>(glfwGetWindowUserPointer(window));
-		if (state != nullptr && state->trayAvailable) {
-			// Hiding, not closing: the tray icon is how it comes back, and QUIT
-			// in its menu is the only exit.
-			glfwHideWindow(window);
-			return;
-		}
-		glfwSetWindowShouldClose(window, GLFW_TRUE);
-	});
-
 	glfwSetWindowCloseCallback(gWindow, [](GLFWwindow* window) {
 		auto* state = static_cast<UiState*>(glfwGetWindowUserPointer(window));
 		if (state == nullptr || !state->trayAvailable) {
@@ -564,17 +724,45 @@ int main(int argc, char** argv) {
 		glfwHideWindow(window);
 	});
 
+	// --- the interface ------------------------------------------------------
+	// ImGui owns the window's input from here on, which is why the hand-rolled
+	// mouse and key callbacks above are gone. The tray is unaffected: it is not a
+	// window, so ImGui has no opinion about the icon.
+	std::unique_ptr<media::ui::UiLayer> uiLayer = media::ui::UiLayer::create(gWindow);
+	if (!uiLayer || !uiLayer->ready()) {
+		LOG_ERROR("Dashboard") << "ImGui failed to start; the launcher cannot draw";
+		dashboard.stop();
+			glfwDestroyWindow(gWindow);
+		glfwTerminate();
+		return 1;
+	}
+	uiLayer->setUiScale(uiScale);
+	uiLayer->setIniPath(media::platform::executableDirectory() + "mediabus-ui.ini");
+	// Correct the framebuffer to the size the layout was written for. See the
+	// identical call in apps/controller/main.cpp.
+	syncWindowToFramebuffer(gWindow, options.width, options.height);
+	// ImGui chains whatever callbacks were already registered, and the window
+	// close callback above must keep working, so it goes first.
+	uiLayer->installCallbacks();
+
+	media::DashboardPanel panel;
+	// The Dashboard is a client of the Controller's script API, exactly as the
+	// Controller is a client of the Player's: it never touches the scripts
+	// directory itself. See ScriptLibrary.
+	media::ScriptLibrary scripts("127.0.0.1", media::AppProbe::kControllerPort);
+	media::ScriptDocument document;
+
 	int fbW = 0;
 	int fbH = 0;
 	glfwGetFramebufferSize(gWindow, &fbW, &fbH);
-	model.layout(static_cast<float>(fbW), static_cast<float>(fbH), uiScale);
 	dashboard.start();
 
 	LOG_NOTICE("Dashboard") << "vn-mediabus-dashboard";
-	LOG_NOTICE("Dashboard") << "  render backend : " << device->backendName();
+	LOG_NOTICE("Dashboard") << "  interface      : " << uiLayer->describe();
+	LOG_NOTICE("Dashboard") << "  fonts          : " << uiLayer->fonts().uiSource
+		<< " / " << uiLayer->fonts().monoSource;
 	LOG_NOTICE("Dashboard") << "  text scale     : "
-		<< media::ui::describeDecision(uiScale, contentScale)
-		<< " -> body " << media::ui::describe(media::ui::bodyScale(uiScale));
+		<< media::ui::describeDecision(uiScale, contentScale);
 	LOG_NOTICE("Dashboard") << "  config file    : " << media::config::configPath();
 	LOG_NOTICE("Dashboard") << "  folder picker  : "
 		<< (media::ui::folderPickerAvailable() ? "available" : "NOT AVAILABLE in this build");
@@ -584,6 +772,12 @@ int main(int argc, char** argv) {
 		<< media::AppProbe::kControllerPort;
 	LOG_NOTICE("Dashboard") << "  exit           : QUIT in the tray menu"
 		<< (ui.trayAvailable ? "" : " (no tray; close the window instead)");
+
+	// When the script list was last refreshed from the Controller, so the panel
+	// does not ask on every frame.
+	std::chrono::steady_clock::time_point lastScriptRefresh{};
+	std::chrono::steady_clock::time_point lastFrame = std::chrono::steady_clock::now();
+	bool wasVisible = true;
 
 	while (!ui.quit && glfwWindowShouldClose(gWindow) == GLFW_FALSE) {
 		glfwPollEvents();
@@ -614,24 +808,43 @@ int main(int argc, char** argv) {
 		tray.setTooltip(trayTooltip(model));
 
 		if (!windowVisible && ui.trayAvailable) {
-			// Hidden in the tray. Block until something happens — a tray click
-			// wakes this, because GLFW waits on every message for the thread,
-			// not only on its own window's — rather than spinning a frame loop
-			// nobody can see.
+			// Hidden in the tray. Block until something happens - a tray click
+			// wakes this, because GLFW waits on every message for the thread, not
+			// only on its own window's - rather than spinning a frame loop nobody
+			// can see.
 			//
-			// Without a tray icon there is nothing to click, so this branch is
-			// only taken when one exists; otherwise the loop keeps running and
-			// the window can be brought back by any normal means.
+			// Note that NO ImGui frame is produced here, on purpose: a hidden
+			// window has nothing to draw, and beginFrame without endFrame would
+			// leave the draw data from the last visible frame waiting.
+			wasVisible = false;
 			glfwWaitEventsTimeout(0.5);
 			continue;
 		}
+		if (!wasVisible) {
+			// Coming back from the tray: the delta clock was stopped for as long
+			// as the window was hidden, and ImGui divides by DeltaTime.
+			wasVisible = true;
+			lastFrame = std::chrono::steady_clock::now();
+		}
 
-		if (ui.clickPending) {
-			ui.clickPending = false;
-			const media::DashboardAction action = model.hitTest(
-				static_cast<float>(ui.x), static_cast<float>(ui.y));
-			if (action != media::DashboardAction::None) {
-				dashboard.handle(action, model);
+		// --- the script list, refreshed a few times a second ----------------
+		// A localhost GET, so it is cheap, but not so cheap that it belongs in a
+		// 60 Hz loop. The Controller is the only thing that can answer it.
+		if (panel.tab() == media::DashboardPanel::Tab::Scripts) {
+			const auto now = std::chrono::steady_clock::now();
+			if (now - lastScriptRefresh > std::chrono::seconds(2)) {
+				lastScriptRefresh = now;
+				std::vector<media::ScriptEntry> entries;
+				const media::ScriptLibrary::Result listed = scripts.list(entries);
+				if (listed.ok) {
+					// Mark which one is running, from the Controller's own answer.
+					for (media::ScriptEntry& entry : entries) {
+						entry.open = (entry.name == document.name());
+					}
+					panel.setScriptList(std::move(entries));
+				} else {
+					panel.setScriptStatus("controller: " + listed.error);
+				}
 			}
 		}
 
@@ -640,14 +853,31 @@ int main(int argc, char** argv) {
 			glfwWaitEventsTimeout(0.05);
 			continue;
 		}
-		model.layout(static_cast<float>(fbW), static_cast<float>(fbH), uiScale);
 
-		device->setViewport(fbW, fbH);
-		device->beginFrame();
-		device->drawSolid({0.0f, 0.0f, static_cast<float>(fbW), static_cast<float>(fbH)},
-			0x10, 0x13, 0x19, 0xFF);
-		view.draw(*device, model, uiScale);
-		device->endFrame();
+		const auto frameNow = std::chrono::steady_clock::now();
+		const double dt = std::chrono::duration<double>(frameNow - lastFrame).count();
+		lastFrame = frameNow;
+
+		uiLayer->beginFrame({fbW, fbH, uiScale, dt});
+
+		media::DashboardPanel::Frame frame = panel.draw(*uiLayer, model, &scripts,
+			document, model.rowFor(media::DashboardApp::Controller).running);
+
+		if (frame.requestQuit) {
+			if (ui.trayAvailable) {
+				// Hiding, not closing: the tray icon is how it comes back, and
+				// QUIT in its menu is the only exit.
+				glfwHideWindow(gWindow);
+			} else {
+				glfwSetWindowShouldClose(gWindow, GLFW_TRUE);
+			}
+		}
+		if (frame.action != media::DashboardAction::None) {
+			dashboard.handle(frame.action, model);
+		}
+		handleScriptRequests(panel, scripts, document, model);
+
+		uiLayer->endFrame();
 		glfwSwapBuffers(gWindow);
 	}
 
@@ -660,7 +890,6 @@ int main(int argc, char** argv) {
 
 	dashboard.stop();
 	tray.destroy();
-	device.reset();
 	glfwDestroyWindow(gWindow);
 	glfwTerminate();
 	return 0;

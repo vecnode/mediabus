@@ -130,6 +130,8 @@ add_library(mediabus_control STATIC
     libs/control/DashboardModel.cpp
     libs/control/LuaControllerScript.cpp
     libs/control/PlayerClient.cpp
+    libs/control/ScriptDocument.cpp
+    libs/control/ScriptLibrary.cpp
     libs/control/TransportAction.cpp
 )
 target_link_libraries(mediabus_control PUBLIC mediabus_core mediabus_net)
@@ -210,6 +212,7 @@ if(MEDIA_BUILD_CONTROLLER OR MEDIA_BUILD_DASHBOARD)
     # UiLayer, which advances the frame and submits the draw data.
     add_library(mediabus_ui STATIC
         libs/ui/UiLayer.cpp
+        libs/ui/widgets/CodeEditor.cpp
     )
     target_include_directories(mediabus_ui PUBLIC ${CMAKE_SOURCE_DIR}/libs)
     target_link_libraries(mediabus_ui PUBLIC mediabus_core imgui)
@@ -322,6 +325,7 @@ if(MEDIA_BUILD_TESTS)
         libs/control/ControllerModel.cpp
         libs/control/DashboardModel.cpp
         libs/control/LuaControllerScript.cpp
+        libs/control/ScriptDocument.cpp
         libs/control/TransportAction.cpp
         libs/gfx/BitmapFont.cpp
     )

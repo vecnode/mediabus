@@ -1,7 +1,6 @@
 #pragma once
 
 #include "control/AppLauncher.h"
-#include "gfx/RenderDevice.h"
 
 #include <array>
 #include <cstddef>
@@ -10,6 +9,11 @@
 namespace media {
 
 /// What clicking a Dashboard button does.
+///
+/// This is the launcher's whole control surface, and it is unchanged by the move
+/// to Dear ImGui: it was a value before there were widgets to produce it, which
+/// is why `Dashboard::handle` could be driven equally well by the tray menu and
+/// by a hand-drawn button. The panel produces one of these; nothing else does.
 enum class DashboardAction {
 	None,
 	LaunchPlayer,
@@ -24,7 +28,7 @@ enum class DashboardAction {
 
 const char* toString(DashboardAction action);
 
-/// One clickable row on the Dashboard.
+/// One row on the Dashboard: one application, and what may be done to it.
 struct DashboardRow {
 	DashboardAction launch = DashboardAction::None;
 	DashboardAction stop = DashboardAction::None;
@@ -32,49 +36,69 @@ struct DashboardRow {
 	DashboardApp app = DashboardApp::Player;
 
 	std::string title;
+	/// What it is, and whether it is up: "running - video + HTTP API :8080".
 	std::string subtitle;
+	/// Absolute path of the executable, empty when it was not found.
 	std::string path;
 	bool available = false;
 	bool running = false;
-	bool managed = false;      ///< A child this Dashboard started.
+	/// A child this Dashboard started. Only such a process may be stopped from
+	/// here: killing a Player the operator launched from Explorer would be
+	/// rude, and the distinction is the whole reason this field exists.
+	bool managed = false;
 	int port = 0;
 
-	Rect card;
-	Rect launchButton;
-	Rect stopButton;
+	/// The LAUNCH button is live only for an application that was found and is
+	/// not already up. Presenting it as live when the executable is missing
+	/// would produce a button that fails on every press.
+	bool canLaunch() const { return available && !running; }
+	/// The STOP button is live only for a process this launcher owns.
+	bool canStop() const { return running && managed; }
 };
 
 /// The media corpus panel: which folder the Player reads, and how many videos
 /// are in it. Deliberately not a DashboardRow - it has one button rather than
-/// two, no "is it running" dot, and a different height, and expressing those
-/// as flags on the app rows would make every one of them conditional.
+/// two, no "is it running" dot, and a different shape, and expressing those as
+/// flags on the app rows would make every one of them conditional.
 struct DashboardCorpus {
+	/// What mediabus.ini holds. Empty means the Player's own default.
 	std::string folder;
 	std::size_t clipCount = 0;
 	/// The Player is up, so the count is live rather than whatever the last
 	/// session wrote down.
 	bool playerOnline = false;
 	/// The folder the Player was last seen using, empty when it reported the
-	/// default. Kept separately from `folder` so the view can say which of the
+	/// default. Kept separately from `folder` so the panel can say which of the
 	/// two the count refers to.
 	std::string playerFolder;
 
-	Rect card;
-	Rect chooseButton;
+	/// True when there is a folder worth naming. The empty state is drawn
+	/// dimmed rather than as a failure: an unset corpus is a normal first run.
+	bool chosen() const { return !folder.empty(); }
 };
 
-/// Dashboard presentation state: layout, hit tests and the small amount of
-/// derived text. No GL, no processes, no HTTP — so the whole thing is testable
-/// without a window.
+/// The Dashboard's state and the small amount of derived text its interface
+/// shows.
+///
+/// No GL, no ImGui, no processes and no HTTP - and, since the interface became
+/// ImGui, no geometry either. Layout used to live here as rectangles hit-tested
+/// by hand; the panel now owns its own widgets, and this class is purely the
+/// state it reads. That is what keeps it testable with no window.
 class DashboardModel {
 public:
-	/// Default window size, in framebuffer pixels at 100% DPI. dashboard_main.cpp
-	/// scales it by the monitor's content scale to match the layout, which is
-	/// written in text units. Sized to hold the title, both application rows,
-	/// the corpus panel and the message line, and no more: the layout flows from
-	/// the top down, so extra height is empty card, not a taller layout.
-	static constexpr int kDefaultWidth = 820;
-	static constexpr int kDefaultHeight = 460;
+	/// Default window size, in pixels.
+	///
+	/// The application asks GLFW for exactly this. It is not multiplied by the
+	/// monitor's content scale: that factor is applied once, when the interface
+	/// font is rasterised, so the text is already bigger on a dense display and
+	/// scaling the frame as well would grow it twice.
+	///
+	/// Sized for the interface that is actually here: two application cards with
+	/// their buttons, the media folder panel, and - on the other two tabs - an
+	/// activity log and a Lua editor, which is why it is taller than the old
+	/// launcher card.
+	static constexpr int kDefaultWidth = 1040;
+	static constexpr int kDefaultHeight = 760;
 
 	/// Rows in display order: the Player first, because that is the one that
 	/// shows something, then the Controller.
@@ -96,36 +120,40 @@ public:
 
 	const DashboardCorpus& corpus() const { return corpus_; }
 
-	/// One line of feedback under the rows (last launch/stop result).
+	/// One line of feedback (last launch/stop result). Empty shows nothing.
 	void setMessage(std::string message);
 	const std::string& message() const { return message_; }
 
-	/// Recompute geometry for a pixel size. Call on start and on resize.
-	/// `uiScale` is the monitor's DPI factor; every constant is multiplied by
-	/// it, so the card grows with its text rather than clipping it.
-	void layout(float width, float height, float uiScale = 1.0f);
+	/// Append a line to the activity log, newest last. Bounded, because a
+	/// launcher that stays up for days must not grow a string without limit.
+	void log(std::string line);
+	const std::string& activityLog() const { return activityLog_; }
+	/// Drop the whole log, for the panel's Clear button.
+	void clearLog() { activityLog_.clear(); }
 
 	const std::array<DashboardRow, kRowCount>& rows() const { return rows_; }
-	const Rect& titleArea() const { return titleArea_; }
-	const Rect& messageArea() const { return messageArea_; }
+	const DashboardRow& rowFor(DashboardApp app) const;
 
-	/// Which action is under (x, y), or kNone. A stop button on an app this
-	/// Dashboard did not start is present but inert; the corpus button is
-	/// always live, because setting the folder needs no running application.
-	DashboardAction hitTest(float x, float y) const;
+	/// The action a row's LAUNCH button should produce, or None when it is
+	/// inert. Kept here rather than in the panel so the enablement rule has one
+	/// home and stays testable.
+	DashboardAction launchActionFor(DashboardApp app) const;
+	DashboardAction stopActionFor(DashboardApp app) const;
 
 	/// Number of rows whose application was found on disk.
 	std::size_t availableCount() const;
 
+	/// How many bytes of log text are retained before the oldest line is
+	/// dropped. Generous for a session, small enough to be harmless.
+	static constexpr std::size_t kMaxLogBytes = 32u * 1024u;
+
 private:
-	DashboardRow& rowFor(DashboardApp app);
-	const DashboardRow& rowFor(DashboardApp app) const;
+	DashboardRow& mutableRowFor(DashboardApp app);
 
 	std::array<DashboardRow, kRowCount> rows_{};
 	DashboardCorpus corpus_;
-	Rect titleArea_{};
-	Rect messageArea_{};
 	std::string message_;
+	std::string activityLog_;
 };
 
 } // namespace media
