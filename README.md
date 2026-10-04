@@ -6,15 +6,15 @@
 ![Build: CMake + Ninja](https://img.shields.io/badge/build-CMake%20%2B%20Ninja-064f8c.svg)
 ![Playback: libmpv](https://img.shields.io/badge/playback-libmpv-3b5526.svg)
 ![Render: OpenGL 3.3 core](https://img.shields.io/badge/render-OpenGL%203.3%20core-5586a4.svg)
-![Tests: 511 checks](https://img.shields.io/badge/tests-511%20checks-brightgreen.svg)
+![Tests: 525 checks](https://img.shields.io/badge/tests-525%20checks-brightgreen.svg)
 
 **One repository, three Windows applications that work together:** a libmpv video
-player with a localhost HTTP control API, a scriptable control bar that drives
-it, and a launcher that starts and supervises both.
+player with a localhost HTTP control API, an ImGui control panel that drives it,
+and a launcher that starts and supervises both — with a Lua editor built in.
 
 > **Status:** all three build from this tree, run side by side, and talk to each
 > other over HTTP — verified on this machine by `tools/verify-live.ps1`
-> (15/15 checks) and by `bin/media_tests.exe` (511 checks, 0 failures). The
+> (31/31 checks) and by `bin/vn-mediabus-tests.exe` (525 checks, 0 failures). The
 > openFrameworks tree, the OCR/corpus layer and the `ytdl` integration are
 > **removed**. See [Known issues](#known-issues) for what is not proven yet.
 
@@ -22,14 +22,16 @@ it, and a launcher that starts and supervises both.
 
 | Application | Binary | What it is | API |
 |---|---|---|---|
-| **Player** | `media-player-cpp.exe` | GLFW + OpenGL 3.3 core + libmpv. Plays video, audio and stills, renders subtitles, draws a status HUD, and is scriptable. | `http://127.0.0.1:8080` |
-| **Controller** | `media-controller-cpp.exe` | A title-bar-shaped control strip. An HTTP *client* of the Player with an embedded Lua 5.1 host, so a session can be scripted. Links no libmpv and owns no decoder. | `http://127.0.0.1:8081` |
-| **Dashboard** | `media-dashboard-cpp.exe` | The launcher, and the one process that stays running: it lives in the notification area and starts and stops the other two. No libmpv, no Lua, no server. | none (launcher) |
+| **Player** | `vn-mediabus-player.exe` | GLFW + OpenGL 3.3 core + libmpv. Plays video, audio and stills, renders subtitles, draws a status HUD, and is scriptable. | `http://127.0.0.1:8080` |
+| **Controller** | `vn-mediabus-controller.exe` | An ImGui control panel. An HTTP *client* of the Player with an embedded Lua 5.1 host, so a session can be scripted. Links no libmpv and owns no decoder. | `http://127.0.0.1:8081` |
+| **Dashboard** | `vn-mediabus-dashboard.exe` | The launcher, and the one process that stays running: it lives in the notification area, starts and stops the other two, and hosts the Lua script editor. No libmpv, no Lua of its own, no server. | none (launcher) |
 
-There is deliberately **no widget toolkit** anywhere — no ImGui, Qt or GTK. Every
-window, including the Dashboard's, draws through the same `RenderDevice` seam
-that composites video, so the GUI dependency list stays at windowing, OpenGL and
-libmpv.
+The Player composites video through the `RenderDevice` seam and draws its own HUD
+as textured quads. The Controller and the Dashboard are built on **Dear ImGui**
+over the same OpenGL context they already own, so their text is a real system
+font (Segoe UI and Consolas) rather than a bitmap, and no widget behaviour is
+hand-rolled. The GUI dependency list is therefore windowing, OpenGL, libmpv and
+one vendored header-only-sized library.
 
 ## How they fit together
 
@@ -179,7 +181,7 @@ Lua/JS scripts to extend behaviour; is driven entirely over a localhost HTTP API
 and draws its status HUD as textured quads on the GL canvas.
 
 ```
-media-player-cpp.exe [--width N] [--height N] [--fullscreen] [--no-hud] [--port N]
+vn-mediabus-player.exe [--width N] [--height N] [--fullscreen] [--no-hud] [--port N]
 Keys:  H toggle HUD   F11 toggle fullscreen   Esc quit
 ```
 
@@ -223,7 +225,7 @@ Player's live state, offers transport buttons and a seek bar, forwards keyboard
 shortcuts, and runs Lua scripts that issue real HTTP commands to the Player.
 
 ```
-media-controller-cpp.exe [--width N] [--height N]
+vn-mediabus-controller.exe [--width N] [--height N]
                          [--player-host HOST] [--player-port N] [--api-port N]
                          [--script FILE] [--list-scripts] [--start-offline]
 Keys:  Space play/pause   H HUD   F fullscreen   S subtitles   R reload script   Esc quit
@@ -254,9 +256,9 @@ come and go from its menu.
 
 ```
 scripts\run.bat
-  └─ media-dashboard-cpp.exe --tray        one process, in the tray
-       ├─ Launch Player      -> media-player-cpp.exe      :8080
-       └─ Launch Controller  -> media-controller-cpp.exe  :8081
+  └─ vn-mediabus-dashboard.exe --tray        one process, in the tray
+       ├─ Launch Player      -> vn-mediabus-player.exe      :8080
+       └─ Launch Controller  -> vn-mediabus-controller.exe  :8081
 ```
 
 | Where | What |
@@ -297,7 +299,7 @@ background thread — never on the frame loop, which must not wait on a socket.
 
 Which folder the Player scans is the one piece of state all three applications
 share across runs, so it lives in a small text file next to the executables:
-**`bin/mediaplayer.ini`**. It is deliberately hand-editable:
+**`bin/mediabus.ini`**. It is deliberately hand-editable:
 
 ```ini
 mediaFolder = D:\Media Corpus
@@ -358,7 +360,7 @@ script reads as a sequence of steps spread across frames.
 pwsh -File tools/package_release.ps1
 ```
 
-Assembles `dist/mediaplayer-app/` with all three executables, the script
+Assembles `dist/vn-mediabus/` with all three executables, the script
 directories and the resolved DLL closure, then **verifies it** by running each
 executable with MSYS2 removed from `PATH` and asking the two that have an API to
 answer on it. That check matters: the Player links libmpv, which drags in a large
@@ -387,7 +389,7 @@ Behaviour is deliberately constrained:
 ```powershell
 # headless: the API contract, playlist logic, Controller request mapping and
 # script-host behaviour, with a stub Player and no window
-cd bin; .\media_tests.exe
+cd bin; .\vn-mediabus-tests.exe
 
 # live: starts real windows and checks the three applications against each other
 powershell -File tools\verify-live.ps1
