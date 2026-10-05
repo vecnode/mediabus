@@ -43,7 +43,7 @@ properties are load-bearing and easy to break:
 
 The tray's actions and the window's buttons both go through the same
 `Dashboard::handle`, so the two paths cannot disagree about what is running.
-`tools/verify-launcher.ps1` drives all of it through the real binary.
+`scripts/tools/verify-launcher.ps1` drives all of it through the real binary.
 
 ### How the three applications talk to each other
 
@@ -74,7 +74,7 @@ dies with `STATUS_ENTRYPOINT_NOT_FOUND`, printing nothing at all. The scripts
 handle this; do not invoke the toolchain by hand without reading BUILDING.md.
 
 ```powershell
-pwsh -File tools/build-libmpv.ps1   # one-time: libmpv against the local ffmpeg
+pwsh -File scripts/tools/build-libmpv.ps1   # one-time: libmpv against the local ffmpeg
 pwsh -File scripts/build.ps1        # configure + build all three apps and the tests
 pwsh -File scripts/build.ps1 -Run           # build and launch the player
 pwsh -File scripts/build.ps1 -Run -App Controller   # or -App Dashboard
@@ -90,13 +90,23 @@ adding `..\` to a path. The wrappers a person double-clicks are:
 | ---- | -------------- |
 | `scripts/build.bat` | the build, with PowerShell 7 or 5.1, whichever exists |
 | `scripts/run.bat` | the launcher in the tray (`--show` for the window instead) |
-| `scripts/run-player.bat` | only `media-player-cpp.exe` |
-| `scripts/run-controller.bat` | only `media-controller-cpp.exe` |
-| `scripts/run-dashboard.bat` | only `media-dashboard-cpp.exe`, window shown |
+| `scripts/run-player.bat` | only `vn-mediabus-player.exe` |
+| `scripts/run-controller.bat` | only `vn-mediabus-controller.exe` |
+| `scripts/run-dashboard.bat` | only `vn-mediabus-dashboard.exe`, window shown |
 
-`scripts/_bin-dir.bat` is `call`ed by all four `run*.bat` to locate `bin/`, so
-they cannot disagree about where the executables are. Keep the wrappers thin —
-`build.ps1` is where the logic belongs.
+Two helpers are `call`ed by all four wrappers so they cannot disagree about how
+an application is started:
+
+- `scripts/_bin-dir.bat` locates `bin/`. Keep the wrappers thin — `build.ps1` is
+  where the logic belongs.
+- `scripts/_start-app.bat` does the launch and the liveness check. Two batch
+  traps are recorded in it and both cost an hour to find: an **empty**
+  `-ArgumentList` is a PowerShell parameter-binding *error*, not a no-op (so a
+  wrapper that splices `'%*'` in launches nothing when double-clicked), and
+  `tasklist`'s default table output **truncates the image name to 25
+  characters**, so `vn-mediabus-controller.exe` never matched a search for its
+  own name and its wrapper always claimed the app had not started. Use
+  `tasklist /fo csv /nh`.
 
 On a machine that only has Windows PowerShell 5.1, `powershell -File
 scripts/build.ps1` is equivalent — the scripts use no PowerShell 7 feature. Do
@@ -105,9 +115,9 @@ not assume `pwsh` exists.
 - Binaries: `bin/media-player-cpp.exe`, `bin/media-controller-cpp.exe`,
   `bin/media-dashboard-cpp.exe`, plus `bin/libmpv-2.dll` (vendored).
 - Tests: `bin/media_tests.exe` (run with `bin/` as the working directory).
-- Live check: `powershell -File tools/verify-live.ps1` starts all three, drives
+- Live check: `powershell -File scripts/tools/verify-live.ps1` starts all three, drives
   them through each other's APIs and exits non-zero on any failed check.
-- Launcher check: `powershell -File tools/verify-launcher.ps1` covers the tray
+- Launcher check: `powershell -File scripts/tools/verify-launcher.ps1` covers the tray
   behaviours below, which no headless test can reach.
 - The apps resolve `bin/data/` **relative to the executable**, so the working
   directory does not matter for media lookup.
@@ -119,7 +129,7 @@ not assume `pwsh` exists.
   to its child.
 - **The tray icon cannot be tested in this session.** `Shell_NotifyIcon` fails
   with error 5 (ACCESS_DENIED) for *every* program here, in a 20-line probe and
-  under the Task Scheduler too. `tools/verify-launcher.ps1` detects that and
+  under the Task Scheduler too. `scripts/tools/verify-launcher.ps1` detects that and
   checks the documented fallback instead: the window is shown, and closing it
   really exits. Do not "fix" a missing icon by changing the tray code — check
   the log line first, and use `--no-tray` when you want the ordinary window on
@@ -134,7 +144,7 @@ libavcodec: build version 62.28.101 incompatible with runtime version 62.28.100
 ```
 
 It was built against a libavcodec one patch newer than the installed ffmpeg, and
-`mpv.exe --version` fails too. `tools/build-libmpv.ps1` builds mpv against the
+`mpv.exe --version` fails too. `scripts/tools/build-libmpv.ps1` builds mpv against the
 ffmpeg that is actually present and vendors the result into `bin/` and `lib/`.
 **Do not replace this with a pacman package.**
 
@@ -184,6 +194,23 @@ down. Keep that precedence: two writers racing over one key is how the displayed
 folder and the scanned folder start disagreeing. The format is deliberately dumb
 (`key = value`, backslash-escaped) so it needs no JSON dependency in `core/` and
 a person can edit it.
+
+**A folder is chosen, never assumed, and the walk is never on the startup path.**
+`MediaClipLibrary::scanBegin()` refuses to walk anything unless `setRoot()` was
+called, so an empty `mediaFolder` means 0 clips and no filesystem work at all: a
+fresh install cannot silently play whatever the build shipped, and "no clips"
+cannot be confused with "the folder moved". When a folder *is* chosen, the walk is
+split into `scanBegin()`/`scanStep(budget)` and the Player advances it from the
+frame loop (`MediaPlayerController::pollScan()`), because a synchronous walk of a
+real folder is unbounded — pointing one at a Desktop of 536,394 files produced a
+window that never painted a single frame, which is indistinguishable from a hang.
+`scan()` remains the one-call version for tests and other non-windowed callers.
+The walk also has a runaway guard (`setScanEntryLimit`, default
+`kMaxScanEntries`): past it the playlist is **refused whole** and the folder
+reports 0 clips, rather than an arbitrary prefix of somebody's home directory
+being offered as a corpus. Keep the progress fields (`scanning`, `scanEntries`,
+`scanTruncated`) on `/api/status` and `/api/media-dir` — additive, and they are
+what lets a client tell "still looking" from "no media here".
 
 **The `RenderDevice` rule (hard):** nothing above `src/app/render/` may name a
 graphics API — and that includes all three `main` files. `RenderDevice.h` exposes
@@ -279,9 +306,11 @@ The controller, `http://127.0.0.1:8081`, localhost only:
   directory component. Keep it that way.
 - **mpv option names differ from the CLI.** libmpv's option table has `scripts`
   (a path list), not `script`; setting the wrong name fails with
-  `option not found`. `p0/audio_probe.cpp` shows the pattern for asking libmpv
-  directly (create, set options, initialize, print properties) rather than
-  guessing — copy it when you need to probe another option.
+  `option not found`. `libs/mpv/MPVSurface.cpp` shows the pattern for asking
+  libmpv directly (create, set options, initialize, read properties back) rather
+  than guessing — extend `applyOptions()` when you need another option. (The
+  standalone audio probe that used to demonstrate this was removed with
+  `experiments/`.)
 - **MSYS-style paths from PowerShell must be quoted** (`"-IC:/msys64/..."`), or
   the linker resolves nothing. A Windows path with backslashes becomes an
   invalid escape in CMake and meson generated files. Forward slashes everywhere.
@@ -294,7 +323,7 @@ The controller, `http://127.0.0.1:8081`, localhost only:
   server was right to send.
 - **Tests are the contract.** Add a check to `tests/test_main.cpp` for any API
   or library behaviour you change; it runs without a GL context. For anything
-  visual or cross-process, add it to `tools/verify-live.ps1` instead, and prefer
+  visual or cross-process, add it to `scripts/tools/verify-live.ps1` instead, and prefer
   screenshots over assertions.
 - **Do not commit build output, media, or the mpv build cache.** `bin/*` (except
   `bin/data/`), `build/`, `.cache/`, `obj/`, binaries and `*.mp4`/`*.png` test

@@ -7,7 +7,11 @@ namespace media {
 
 enum class ClipMediaType {
 	Video,
-	Image
+	Image,
+	/// A fragment shader: a clip that is GENERATED rather than decoded. It has no
+	/// decoder, no timeline and no audio, so nothing in the playback path may
+	/// hand one to mpv. See libs/shader/ShaderClipRenderer.
+	Shader
 };
 
 const char* toString(ClipMediaType type);

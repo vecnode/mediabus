@@ -31,8 +31,8 @@ public:
 	/// hands it straight to TransportExecutor.
 	struct Frame {
 		TransportAction action;
-		/// True when the operator asked to quit (Esc). The application decides
-		/// what that means.
+		/// True when the operator asked to quit (Esc, then Yes). The application
+		/// decides what that means.
 		bool requestQuit = false;
 	};
 
@@ -61,10 +61,17 @@ private:
 	void drawMessage(const ControllerModel& model);
 	void drawScripts(const ControllerModel& model, const std::string& scriptName,
 		const std::string& scriptError, bool scriptRunning, Frame& frame);
+	/// The Yes/No confirmation Esc opens. Reports a confirmed quit through
+	/// `frame.requestQuit`; cancelling leaves everything alone.
+	void drawQuitConfirm(Frame& frame);
 
 	std::string playerEndpoint_;
 	std::string scriptLog_;
 	float scriptBudget_ = 0.0f;
+	/// Set by Esc, consumed on the next draw by OpenPopup. A flag rather than an
+	/// immediate OpenPopup because the key is read in the same frame the popup
+	/// has to be declared, and ImGui needs the Open call to precede BeginPopup.
+	bool quitConfirmOpen_ = false;
 
 	// The seek bar is a widget the operator drags while the Player keeps
 	// reporting a position. `seekDraft_` is the value under the operator's hand,

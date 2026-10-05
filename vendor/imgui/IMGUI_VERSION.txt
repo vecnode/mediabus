@@ -1,7 +1,7 @@
 Dear ImGui v1.92.9b
 Source: https://github.com/ocornut/imgui
 Commit: f1cc2ae15e53a861a874c3034aae6798fde194ab
-Fetched by: tools/fetch-imgui.ps1
+Fetched by: scripts/tools/fetch-imgui.ps1
 
 Vendored deliberately, exactly like vendor/httplib.h and vendor/json.hpp, so a
 clone builds with no network access. The version is pinned: ImGui's API does
@@ -22,4 +22,4 @@ tempting to compile the backend directly against GLEW. Dear ImGui 1.92 dropped
 that hook: the macro is still tested but nothing includes a custom header any
 more, so defining it makes every GL type undefined. Do not reintroduce it.
 
-To refresh:   pwsh -File tools/fetch-imgui.ps1 -Version vX.Y.Z -Force
+To refresh:   pwsh -File scripts/tools/fetch-imgui.ps1 -Version vX.Y.Z -Force

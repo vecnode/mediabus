@@ -13,9 +13,9 @@
 # likely to leak.
 #
 # Usage:
-#   pwsh -File tools/soak.ps1                      # 5 minutes
-#   pwsh -File tools/soak.ps1 -Minutes 20
-#   pwsh -File tools/soak.ps1 -Minutes 1440        # a full day
+#   pwsh -File scripts/tools/soak.ps1                      # 5 minutes
+#   pwsh -File scripts/tools/soak.ps1 -Minutes 20
+#   pwsh -File scripts/tools/soak.ps1 -Minutes 1440        # a full day
 
 param(
     [int]$Minutes = 5,
@@ -26,7 +26,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Repo = Split-Path -Parent $PSScriptRoot
+$Repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Bin = Join-Path $Repo 'bin'
 $Exe = Join-Path $Bin 'vn-mediabus-player.exe'
 $Base = 'http://127.0.0.1:8080'

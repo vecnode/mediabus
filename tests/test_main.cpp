@@ -2076,37 +2076,56 @@ TEST(controller_state_survives_a_refused_player_reply) {
 // that went in means the Player scans a folder nobody chose. The escape rules
 // are what would break first, so they are asserted directly.
 // ---------------------------------------------------------------------------
-TEST(appconfig_round_trips_the_media_folder) {
+TEST(appconfig_round_trips_the_media_folders) {
 	media::config::Config parsed;
-	// Empty is a meaningful state ("use the Player's default"), not a missing
-	// one, so it must survive the round trip rather than being dropped.
+	// Empty is a meaningful state ("nothing chosen"), not a missing one, so it
+	// must survive the round trip rather than being dropped.
 	media::config::parse(media::config::serialize(parsed), parsed);
-	checkEqStr(parsed.mediaFolder, "", "an unset folder stays unset");
+	check(parsed.mediaFolders.empty(), "an unset corpus stays unset");
+	checkEqStr(parsed.primaryMediaFolder(), "", "and it names no folder");
 
 	media::config::Config written;
-	written.mediaFolder = "D:\\Media Corpus\\Shows & Films";
+	written.mediaFolders = {"D:\\Media Corpus\\Shows & Films"};
 	written.uiScale = 1.75f;
 	media::config::Config readBack;
 	media::config::parse(media::config::serialize(written), readBack);
-	checkEqStr(readBack.mediaFolder, written.mediaFolder,
+	checkEqStr(readBack.primaryMediaFolder(), written.primaryMediaFolder(),
 		"an ordinary path survives serialise + parse");
 	check(std::abs(readBack.uiScale - 1.75f) < 0.001f, "the uiScale setting survives");
+
+	// SEVERAL folders, in order. This is the whole reason the value is a list:
+	// media in more than one place is merged rather than moved, and the order the
+	// operator set comes back as the order they set.
+	media::config::Config many;
+	many.mediaFolders = {"D:\\Shows", "E:\\Films", "F:\\Archive 2026"};
+	media::config::Config manyBack;
+	media::config::parse(media::config::serialize(many), manyBack);
+	checkEq(manyBack.mediaFolders.size(), std::size_t{3},
+		"every folder in the list comes back");
+	check(manyBack.mediaFolders == many.mediaFolders,
+		"and in the order they were written");
 
 	// '=' is the key/value separator and '\' is the escape character: a folder
 	// containing either must not corrupt the file or truncate the path.
 	media::config::Config awkward;
-	awkward.mediaFolder = "C:\\odd=name\\back\\slash";
+	awkward.mediaFolders = {"C:\\odd=name\\back\\slash"};
 	media::config::Config awkwardBack;
 	media::config::parse(media::config::serialize(awkward), awkwardBack);
-	checkEqStr(awkwardBack.mediaFolder, awkward.mediaFolder,
+	checkEqStr(awkwardBack.primaryMediaFolder(), awkward.primaryMediaFolder(),
 		"'=' and '\\' in a path survive the round trip");
 
 	// A key this build does not know must be ignored, not treated as an error:
 	// a newer binary may have written the file.
 	media::config::Config forward;
-	forward.mediaFolder = "D:\\kept";
 	media::config::parse("someFutureKey = 12\nmediaFolder = D:\\kept\n", forward);
-	checkEqStr(forward.mediaFolder, "D:\\kept", "an unknown key does not stop the parse");
+	checkEqStr(forward.primaryMediaFolder(), "D:\\kept",
+		"an unknown key does not stop the parse");
+
+	// An empty value is "nothing chosen", not a folder whose name is the empty
+	// string - which is the state a file written with no folders contains.
+	media::config::Config cleared;
+	media::config::parse("mediaFolder = \nuiScale = 0\n", cleared);
+	check(cleared.mediaFolders.empty(), "an empty value is not a folder");
 
 	// A real file, so load()/save() are covered and not just the text helpers.
 	const std::string path = media::platform::executableDirectory()
@@ -2118,12 +2137,13 @@ TEST(appconfig_round_trips_the_media_folder) {
 	check(!media::config::load(path, absent),
 		"a missing file reports false rather than failing");
 	media::config::Config target;
-	target.mediaFolder = "E:\\Corpus";
+	target.mediaFolders = {"E:\\Corpus", "G:\\Second"};
 	target.uiScale = 0.0f;
 	check(media::config::save(path, target), "save writes the file");
 	media::config::Config fromDisk;
 	check(media::config::load(path, fromDisk), "load reads what save wrote");
-	checkEqStr(fromDisk.mediaFolder, "E:\\Corpus", "the folder came back off disk");
+	check(fromDisk.mediaFolders == target.mediaFolders,
+		"the whole folder list came back off disk");
 
 	std::filesystem::remove(path, ec);
 }
@@ -2237,19 +2257,35 @@ TEST(dashboard_corpus_panel_reports_the_folder_and_the_count) {
 	// A folder is set, and the Player is running and reading it.
 	model.setCorpus("D:\\Corpus", 12, true, "D:\\Corpus");
 	check(model.corpus().chosen(), "a set folder counts as chosen");
-	checkEqStr(model.corpus().folder, "D:\\Corpus", "the configured folder is kept");
+	checkEqStr(model.corpus().primaryFolder(), "D:\\Corpus",
+		"the configured folder is kept");
 	checkEq(model.corpus().clipCount, std::size_t{12}, "the live count is kept");
 	check(model.corpus().playerOnline, "the Player is reported online");
-	checkEqStr(model.corpus().playerFolder, "D:\\Corpus",
+	checkEqStr(model.corpus().primaryPlayerFolder(), "D:\\Corpus",
 		"the folder the Player is actually reading is kept separately");
 
-	// The two folders differ, which is the case the panel exists to make visible:
+	// SEVERAL folders, merged. The panel has to hold all of them: with only the
+	// first on screen, a clip that came from the second looks like it came from
+	// nowhere - which is exactly what the tab exists to explain.
+	model.setCorpus(std::vector<std::string>{"D:\\Shows", "E:\\Films", "F:\\Archive"},
+		42, true, std::vector<std::string>{"D:\\Shows", "E:\\Films", "F:\\Archive"});
+	checkEq(model.corpus().folders.size(), std::size_t{3},
+		"every configured folder is kept");
+	checkEq(model.corpus().playerFolders.size(), std::size_t{3},
+		"every folder the Player reported is kept");
+	checkEqStr(model.corpus().primaryFolder(), "D:\\Shows",
+		"the first configured folder is the one the one-line callers name");
+
+	// The two lists differ, which is the case the panel exists to make visible:
 	// someone edited mediabus.ini while a Player was already running.
-	model.setCorpus("D:\\NewCorpus", 0, true, "D:\\Corpus");
-	checkEqStr(model.corpus().folder, "D:\\NewCorpus", "the offered folder changed");
-	checkEqStr(model.corpus().playerFolder, "D:\\Corpus",
-		"the folder the Player is still reading did not");
-	check(!model.corpus().chosen() == false, "a non-empty folder is chosen");
+	model.setCorpus(std::vector<std::string>{"D:\\NewCorpus"}, 0, true,
+		std::vector<std::string>{"D:\\Shows", "E:\\Films"});
+	checkEqStr(model.corpus().primaryFolder(), "D:\\NewCorpus",
+		"the offered folders changed");
+	checkEqStr(model.corpus().primaryPlayerFolder(), "D:\\Shows",
+		"the folders the Player is still reading did not");
+	check(model.corpus().playerFolders != model.corpus().folders,
+		"the disagreement is visible to the panel");
 }
 
 // ---------------------------------------------------------------------------
@@ -2414,6 +2450,286 @@ TEST(controller_client_posts_the_media_folder_to_the_players_route) {
 	if (listener.joinable()) {
 		listener.join();
 	}
+}
+
+// ---------------------------------------------------------------------------
+// mediacliplibrary_scans_nothing_until_a_folder_is_chosen
+//
+// The rule that gives "0 clips" a meaning. A library nobody pointed at a folder
+// has a default root to REPORT but nothing to walk. Without it a fresh install
+// silently played whatever happened to ship in bin/data, and an operator could
+// not tell "nothing chosen yet" from "the folder moved".
+// ---------------------------------------------------------------------------
+TEST(mediacliplibrary_scans_nothing_until_a_folder_is_chosen) {
+	media::MediaClipLibrary library;
+	check(!library.hasRoot(), "a fresh library has no chosen folder");
+
+	// bin/data really does hold media in a built tree, so scanning nothing has to
+	// be a decision this library makes rather than a consequence of an empty
+	// folder. That distinction is the whole point of the check.
+	library.scan();
+	checkEq(library.size(), std::size_t{0}, "nothing is scanned before a folder is chosen");
+	checkEqStr(library.searchLog(), "no folder chosen", "and the reason is reportable");
+	check(!library.scanning(), "no walk is left running either");
+
+	// Choosing a folder is what turns the walk on.
+	ScopedDataDir data(true);
+	scanInto(library, data);
+	check(library.hasRoot(), "setRoot() is what marks a folder as chosen");
+	check(library.size() > 0, "and then it does scan");
+}
+
+// ---------------------------------------------------------------------------
+// mediacliplibrary_scan_is_interruptible
+//
+// The property the render loop depends on, and whose absence made a folder of
+// 536,394 files look exactly like a hang: a bounded step must HAND BACK control
+// with the walk still live, and draining it a step at a time must reach exactly
+// the playlist that one scan() reaches.
+// ---------------------------------------------------------------------------
+TEST(mediacliplibrary_scan_is_interruptible) {
+	ScopedDataDir data(true);
+
+	// The one-call answer, to compare against.
+	media::MediaClipLibrary oneCall;
+	scanInto(oneCall, data);
+	check(oneCall.size() > 1, "the fixture holds more than one entry to walk");
+
+	media::MediaClipLibrary stepped;
+	stepped.setRoot(data.root.string());
+	stepped.scanBegin();
+	check(stepped.scanning(), "a chosen folder starts a walk");
+
+	// A one-entry budget must neither finish the fixture nor lose the walk.
+	const media::MediaClipLibrary::ScanBudget oneEntry{
+		1, std::chrono::milliseconds(0)};
+	check(!stepped.scanStep(oneEntry), "a one-entry budget hands control back");
+	check(stepped.scanning(), "the walk is still live between steps");
+	checkEq(stepped.scanEntries(), std::size_t{1}, "and the step still made progress");
+
+	// Draining it the way pollScan() does converges on the same answer.
+	std::size_t steps = 1;
+	while (stepped.scanning() && steps < 100000) {
+		stepped.scanStep(oneEntry);
+		++steps;
+	}
+	check(!stepped.scanning(), "the walk finishes when it is drained");
+	check(steps > 1, "it genuinely took more than one step to get there");
+	checkEq(stepped.size(), oneCall.size(),
+		"stepping to the end finds exactly what one call finds");
+	checkEq(stepped.scanFound(), stepped.size(),
+		"the running total the HUD draws is the playlist size");
+	check(!stepped.scanTruncated(), "a fixture is nowhere near the runaway guard");
+}
+
+// ---------------------------------------------------------------------------
+// mediacliplibrary_refuses_a_folder_past_its_entry_limit
+//
+// The runaway guard, reached here with a two-entry ceiling rather than half a
+// million files. What matters is the CHOICE it makes: an over-large root yields
+// no playlist at all, because an arbitrary prefix of somebody's home directory
+// presented as a corpus reads as a successful scan of the wrong thing - which is
+// worse than an honest empty screen with a reason on it.
+// ---------------------------------------------------------------------------
+TEST(mediacliplibrary_refuses_a_folder_past_its_entry_limit) {
+	ScopedDataDir data(true);
+	media::MediaClipLibrary library;
+	library.setRoot(data.root.string());
+	checkEq(library.scanEntryLimit(), media::MediaClipLibrary::kMaxScanEntries,
+		"the default ceiling is the library's own");
+
+	library.setScanEntryLimit(2);
+	library.scan();
+
+	check(library.scanTruncated(), "hitting the ceiling is reported");
+	checkEq(library.size(), std::size_t{0},
+		"an over-large folder yields NO playlist rather than an arbitrary prefix");
+	check(!library.scanning(), "the walk is over, not left running");
+	check(library.searchLog().find("refused") != std::string::npos,
+		"and the summary says the folder was refused: " + library.searchLog());
+
+	// The ceiling belongs to the scan, not to the library: lifting it and
+	// scanning again has to work, or one bad folder would poison the instance.
+	library.setScanEntryLimit(0);
+	library.scan();
+	check(!library.scanTruncated(), "a lifted ceiling scans normally again");
+	check(library.size() > 0, "and finds the fixture");
+}
+
+// ---------------------------------------------------------------------------
+// controller_poll_scan_keeps_a_large_folder_off_the_startup_path
+//
+// beginStartupScan() deliberately takes NO synchronous slice, so startup reaches
+// its first frame without touching the filesystem whatever the folder. pollScan()
+// finishes the walk, and finishing it is what opens the first clip.
+// ---------------------------------------------------------------------------
+TEST(controller_poll_scan_keeps_a_large_folder_off_the_startup_path) {
+	ScopedDataDir data(true);
+	media::MediaClipLibrary library;
+	media::MediaPlayerController player(library, nullptr);
+
+	player.beginStartupScan(data.root.string());
+	check(player.scanPending(), "startup begins the walk but does not run it");
+	checkEq(player.getStatus().clipCount, std::size_t{0},
+		"nothing is loaded before the first frame");
+	check(player.getStatus().scanning, "and the status says a walk is running");
+
+	// One frame's worth at a time, exactly as the render loop drives it.
+	bool completed = false;
+	for (int frame = 0; frame < 1000 && !completed; ++frame) {
+		completed = player.pollScan();
+	}
+	check(completed, "some frame completes the walk");
+	check(!player.scanPending(), "no walk is left pending");
+	check(player.getClips().size() > 0, "the corpus is loaded once the walk ends");
+	check(player.getStatus().loaded, "and the first clip is open");
+	check(!player.getStatus().scanning, "the status stops reporting a walk");
+
+	// "No folder chosen" is not a fallback to bin/data: it loads nothing at all,
+	// whatever the build happens to have left in there.
+	media::MediaClipLibrary unchosen;
+	media::MediaPlayerController idle(unchosen, nullptr);
+	idle.beginStartupScan("");
+	idle.pollScan();
+	checkEq(idle.getClips().size(), std::size_t{0},
+		"an unchosen folder loads no clips, whatever bin/data holds");
+	checkEqStr(idle.mediaFolder(), "", "and the folder is reported as unset, not as the default");
+}
+
+// ---------------------------------------------------------------------------
+// mediacliplibrary_merges_several_roots
+//
+// The corpus is the UNION of the configured folders, so media in two places
+// plays as one playlist instead of having to be moved together or shortcut-ed
+// into a single directory.
+// ---------------------------------------------------------------------------
+TEST(mediacliplibrary_merges_several_roots) {
+	ScopedDataDir data(true);
+
+	// A second corpus folder, made by hand and OUTSIDE the first. ScopedDataDir
+	// names its directory after the process id, so two of them in one test would
+	// fight over one path - and nesting the second inside the first would make
+	// the two roots overlap for reasons this test did not intend.
+	const std::filesystem::path second = std::filesystem::path(
+		media::platform::executableDirectory())
+		/ ("tests-tmp-second-" + std::to_string(::GetCurrentProcessId()));
+	std::error_code ec;
+	std::filesystem::remove_all(second, ec);
+	std::filesystem::create_directories(second, ec);
+	std::ofstream(second / "zz-second-image.png").put('\0');
+	std::ofstream(second / "zz-second-video.mp4").put('\0');
+
+	media::MediaClipLibrary library;
+	library.setRoots({data.root.string(), second.string()});
+	library.scan();
+
+	check(library.hasRoot(), "two folders count as chosen");
+	checkEq(library.roots().size(), std::size_t{2}, "both are remembered and reported");
+	checkEq(library.size(), std::size_t{5},
+		"the playlist is the union of both folders");
+
+	bool sawSecond = false;
+	for (const media::MediaClip& clip : library.allClips()) {
+		if (clip.displayName == "zz-second-image.png") {
+			sawSecond = true;
+		}
+	}
+	check(sawSecond, "a clip from the second folder is in the merged playlist");
+	check(library.searchLog().find(" + ") != std::string::npos,
+		"the summary names both roots: " + library.searchLog());
+
+	// OVERLAP. Listing the same folder twice must not list its files twice, which
+	// is also what protects the case of a folder that sits inside another one that
+	// is listed as well.
+	library.setRoots({data.root.string(), data.root.string()});
+	library.scan();
+	checkEq(library.size(), std::size_t{3},
+		"listing a folder twice does not duplicate its clips");
+
+	// A root that no longer exists is skipped with a warning and the others still
+	// load. One stale path must not empty the corpus.
+	library.setRoots({data.root.string(), (data.root / "gone").string()});
+	library.scan();
+	checkEq(library.size(), std::size_t{3}, "a missing root does not cost the good ones");
+
+	std::filesystem::remove_all(second, ec);
+}
+
+// ---------------------------------------------------------------------------
+// the_builtin_shader_library_is_not_a_chosen_folder
+//
+// The shader library is the one folder nobody picked, and it must not be
+// reported as a choice: the Player would otherwise claim an operator had chosen
+// a corpus when they had not.
+// ---------------------------------------------------------------------------
+TEST(the_builtin_shader_library_is_not_a_chosen_folder) {
+	const std::filesystem::path shaderDir = std::filesystem::path(
+		media::platform::executableDirectory())
+		/ ("tests-tmp-shaders-" + std::to_string(::GetCurrentProcessId()));
+	std::error_code ec;
+	std::filesystem::remove_all(shaderDir, ec);
+	std::filesystem::create_directories(shaderDir, ec);
+	std::ofstream(shaderDir / "only.frag") << "#version 330 core\n";
+
+	media::MediaClipLibrary library;
+	library.setBuiltinRoot(shaderDir.string());
+	library.scan();
+
+	check(library.hasBuiltinRoot(), "the library was given a built-in root");
+	check(!library.hasRoot(), "which is NOT a folder the operator chose");
+	checkEq(library.size(), std::size_t{1},
+		"the shader library alone still fills the playlist");
+	check(library.clipAt(0).mediaType == media::ClipMediaType::Shader,
+		"and what it holds is a shader");
+
+	// No built-in root and no chosen folder is STILL nothing: the rule that keeps
+	// a fresh install from playing whatever happened to ship in bin/data.
+	media::MediaClipLibrary bare;
+	check(!bare.hasBuiltinRoot(), "a library has no built-in root by default");
+	bare.scan();
+	checkEq(bare.size(), std::size_t{0}, "and then it scans nothing at all");
+
+	std::filesystem::remove_all(shaderDir, ec);
+}
+
+// ---------------------------------------------------------------------------
+// shader_clips_are_never_handed_to_the_decoder
+//
+// A .frag has no decoder. Handing one to mpv would fail with "unrecognised
+// format", which reads as a broken clip rather than as a clip of a different
+// kind, so the controller must keep it away from the backend and expose the
+// source path for the host to compile instead.
+// ---------------------------------------------------------------------------
+TEST(shader_clips_are_never_handed_to_the_decoder) {
+	ScopedDataDir data(true);
+	std::ofstream(data.root / "zz-shader.frag") << "#version 330 core\n";
+
+	media::MediaClipLibrary library;
+	scanInto(library, data);
+
+	checkEq(library.shaderCount(), std::size_t{1}, "the .frag was recognised as a shader");
+	check(library.clipAt(library.size() - 1).mediaType == media::ClipMediaType::Shader,
+		"and it sorts last, after the pictures and the videos");
+
+	RecordingBackend backend;
+	media::MediaPlayerController player(library, &backend);
+	check(player.setup(), "setup opens the first clip");
+
+	std::size_t shaderIndex = 0;
+	check(library.indexForName("zz-shader.frag", shaderIndex), "the shader is findable");
+	const std::string decoderWasShowing = backend.opened;
+
+	check(player.openClipAtIndex(shaderIndex), "opening a shader clip succeeds");
+	checkEqStr(backend.opened, decoderWasShowing,
+		"the decoder was NOT asked to open the shader");
+
+	const media::MediaPlayerStatus status = player.getStatus();
+	check(status.loaded, "the shader clip counts as loaded");
+	check(status.isShader, "the status says it is a shader");
+	check(!status.isImage, "a shader is not reported as a still");
+	check(!status.seekable, "a shader has no timeline to seek");
+	checkEqStr(status.clipPath, library.clipAt(shaderIndex).absolutePath,
+		"the status carries the source path, which is what the host compiles");
 }
 
 // ---------------------------------------------------------------------------

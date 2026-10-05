@@ -15,6 +15,7 @@ const char* toString(DashboardAction action) {
 		case DashboardAction::StopPlayer: return "stop-player";
 		case DashboardAction::StopController: return "stop-controller";
 		case DashboardAction::ChooseMediaFolder: return "choose-media-folder";
+		case DashboardAction::RemoveMediaFolder: return "remove-media-folder";
 	}
 	return "none";
 }
@@ -66,12 +67,12 @@ void DashboardModel::setMessage(std::string message) {
 	message_ = std::move(message);
 }
 
-void DashboardModel::setCorpus(std::string folder, std::size_t clipCount,
-	bool playerOnline, std::string playerFolder) {
-	corpus_.folder = std::move(folder);
+void DashboardModel::setCorpus(std::vector<std::string> folders, std::size_t clipCount,
+	bool playerOnline, std::vector<std::string> playerFolders) {
+	corpus_.folders = std::move(folders);
 	corpus_.clipCount = clipCount;
 	corpus_.playerOnline = playerOnline;
-	corpus_.playerFolder = std::move(playerFolder);
+	corpus_.playerFolders = std::move(playerFolders);
 }
 
 void DashboardModel::log(std::string line) {

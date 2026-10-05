@@ -108,6 +108,37 @@ std::string scriptsDirectory() {
 	return joinPath(dataDirectory(), "scripts");
 }
 
+std::string shaderDirectory() {
+	// Fixed candidates rather than configuration: this is the one directory the
+	// Player reads that nobody chose, so it must resolve predictably. See the
+	// header for why each candidate exists.
+	const std::string exe = executableDirectory();
+	const std::string candidates[] = {
+		joinPath(exe, "data") + "/shaders",
+		joinPath(exe, "..") + "/assets/shaders",
+		joinPath(exe, "assets") + "/shaders",
+	};
+
+	std::error_code ec;
+	for (const std::string& candidate : candidates) {
+		if (!fs::is_directory(candidate, ec)) {
+			ec.clear();
+			continue;
+		}
+		// weakly_canonical rather than absolute: it collapses the ".." in the
+		// built-tree candidate, so the path the log prints is the real folder
+		// rather than one with "bin\..\assets" left in the middle of it.
+		const fs::path resolved = fs::weakly_canonical(candidate, ec);
+		if (ec) {
+			return candidate;
+		}
+		fs::path preferred = resolved;
+		preferred.make_preferred();
+		return preferred.string();
+	}
+	return {};
+}
+
 std::string lowerExtension(const std::string& path) {
 	const std::size_t slash = path.find_last_of("/\\");
 	const std::size_t dot = path.find_last_of('.');

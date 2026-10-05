@@ -5,7 +5,7 @@
 # cheap status reads with rapid clip switching, seeks and volume changes. This
 # harness isolates those, so the culprit is identified rather than guessed at.
 #
-# Usage: pwsh -File tools/stress-switch.ps1 -Mode switch|seek|volume|play -Iterations 400
+# Usage: pwsh -File scripts/tools/stress-switch.ps1 -Mode switch|seek|volume|play -Iterations 400
 
 param(
     [ValidateSet('switch', 'seek', 'volume', 'play', 'status')]
@@ -15,7 +15,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$Repo = Split-Path -Parent $PSScriptRoot
+$Repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Bin = Join-Path $Repo 'bin'
 $Exe = Join-Path $Bin 'vn-mediabus-player.exe'
 $Base = 'http://127.0.0.1:8080'

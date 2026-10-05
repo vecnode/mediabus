@@ -94,6 +94,10 @@ bool tabFromName(const std::string& name, media::DashboardPanel::Tab& out) {
 		out = media::DashboardPanel::Tab::Applications;
 		return true;
 	}
+	if (name == "corpus" || name == "media" || name == "clips") {
+		out = media::DashboardPanel::Tab::Corpus;
+		return true;
+	}
 	if (name == "scripts") {
 		out = media::DashboardPanel::Tab::Scripts;
 		return true;
@@ -113,7 +117,7 @@ void printUsage() {
 		"\n"
 		"  --width N     window width  (default %d pixels)\n"
 		"  --height N    window height (default %d pixels)\n"
-		"  --tab NAME    open on this tab: applications | scripts | activity\n"
+		"  --tab NAME    open on this tab: applications | corpus | scripts | activity\n"
 		"  --tray        start hidden, in the notification area\n"
 		"  --no-tray     never add a tray icon; the window is the whole UI and\n"
 		"                closing it exits (use this if no tray icon appears)\n"
@@ -124,8 +128,9 @@ void printUsage() {
 		"Window: click LAUNCH on a row. STOP only stops an app this launcher "
 		"started.\n"
 		"        CHANGE... picks the media corpus folder the Player reads.\n"
-		"Keys:  Esc hides the window while the tray icon is there; QUIT in the "
-		"tray menu exits.\n",
+		"        The Corpus tab lists the media the Player actually found.\n"
+		"Keys:  Esc asks whether to quit. Yes closes THIS launcher only, so the\n"
+		"       Player keeps playing; QUIT in the tray menu stops everything.\n",
 		media::DashboardModel::kDefaultWidth, media::DashboardModel::kDefaultHeight);
 }
 
@@ -243,7 +248,10 @@ public:
 	/// what keeps this panel from reporting a folder the decoder is not using.
 	struct CorpusSnapshot {
 		bool online = false;
-		std::string folder;
+		/// The folders the Player reported it is reading. A list, because the
+		/// corpus is the merge of all of them, and a panel that shows only the
+		/// first cannot explain where a clip came from.
+		std::vector<std::string> folders;
 		std::size_t clipCount = 0;
 	};
 
@@ -297,17 +305,18 @@ public:
 		model.setStatus(media::DashboardApp::Controller, controllerStatus_,
 			controllerPath_, media::AppProbe::kControllerPort);
 
-		// The *configured* folder is what this Dashboard is offering; the live
-		// count comes from the Player. Keeping both means the panel stays
-		// honest when someone edits mediabus.ini or starts the Player with a
-		// different folder than the one recorded here.
+		// The *configured* folders are what this Dashboard is offering; the live
+		// count comes from the Player. Keeping both means the panel stays honest
+		// when someone edits mediabus.ini or starts the Player with a different
+		// set than the one recorded here.
 		media::config::Config config;
 		media::config::load(config);
-		model.setCorpus(config.mediaFolder, corpus_.clipCount, corpus_.online,
-			corpus_.folder);
+		model.setCorpus(config.mediaFolders, corpus_.clipCount, corpus_.online,
+			corpus_.folders);
 	}
 
-	void handle(media::DashboardAction action, media::DashboardModel& model) {
+	void handle(media::DashboardAction action, media::DashboardModel& model,
+		const std::string& folder = std::string()) {
 		std::string error;
 		bool ok = false;
 		switch (action) {
@@ -324,7 +333,12 @@ public:
 				ok = controller_.stop(error);
 				break;
 			case media::DashboardAction::ChooseMediaFolder:
-				chooseMediaFolder(model);
+				addMediaFolder(model);
+				return;
+			case media::DashboardAction::RemoveMediaFolder:
+				// The folder travels in the frame, not in the action: with several
+				// rows on screen the action alone cannot say which was clicked.
+				removeMediaFolder(model, folder);
 				return;
 			case media::DashboardAction::None:
 				return;
@@ -338,12 +352,18 @@ public:
 	/// Runs on the main thread: the picker is a modal dialog with its own
 	/// message loop, so it must never run on the probe thread or on an HTTP
 	/// worker.
-	void chooseMediaFolder(media::DashboardModel& model) {
+	/// Ask for a folder to ADD to the corpus, then apply the longer list.
+	///
+	/// Runs on the main thread: the picker is a modal dialog with its own
+	/// message loop, so it must never run on the probe thread or on an HTTP
+	/// worker.
+	void addMediaFolder(media::DashboardModel& model) {
 		bool cancelled = false;
 		media::config::Config current;
 		media::config::load(current);
 		const std::string chosen = media::ui::pickFolder(
-			"Select the media corpus folder", current.mediaFolder, &cancelled);
+			"Add a media folder to the corpus", current.primaryMediaFolder(),
+			&cancelled);
 		if (cancelled) {
 			return;   // a cancelled dialog is not an outcome worth reporting
 		}
@@ -353,29 +373,81 @@ public:
 			return;
 		}
 
-		current.mediaFolder = chosen;
-		const bool saved = media::config::save(current);
+		// APPENDED, not replaced: the corpus is the merge of every folder listed,
+		// which is the entire point of allowing more than one. A folder that is
+		// already there is reported rather than added twice.
+		std::vector<std::string> wanted = current.mediaFolders;
+		bool alreadyThere = false;
+		for (const std::string& folder : wanted) {
+			if (folder == chosen) {
+				alreadyThere = true;
+				break;
+			}
+		}
+		if (!alreadyThere) {
+			wanted.push_back(chosen);
+		}
 
-		// A running Player is re-pointed immediately; one that is down will
-		// read the file at its next start. Both paths end in the same state.
-		std::string note;
+		applyFolders(model, wanted, alreadyThere
+			? "already in the corpus: " + chosen
+			: "added to the corpus: " + chosen);
+	}
+
+	/// Drop one folder from the corpus and apply the shorter list.
+	void removeMediaFolder(media::DashboardModel& model, const std::string& folder) {
+		if (folder.empty()) {
+			return;
+		}
+		media::config::Config current;
+		media::config::load(current);
+
+		std::vector<std::string> wanted;
+		wanted.reserve(current.mediaFolders.size());
+		for (const std::string& entry : current.mediaFolders) {
+			if (entry != folder) {
+				wanted.push_back(entry);
+			}
+		}
+		if (wanted.size() == current.mediaFolders.size()) {
+			model.setMessage("not in the corpus: " + folder);
+			return;
+		}
+
+		applyFolders(model, wanted, "removed from the corpus: " + folder);
+	}
+
+	/// Persist `folders`, hand them to a running Player, and report what happened.
+	///
+	/// One place for both edits, so add and remove cannot disagree about how the
+	/// setting is written or about what an absent Player is told.
+	void applyFolders(media::DashboardModel& model,
+		const std::vector<std::string>& folders, const std::string& note) {
+		std::string message = note;
+
 		if (player_.status().running()) {
+			// While the Player is up it is the SINGLE WRITER of this setting: it
+			// persists the new list itself, in the same call. Writing the file
+			// here as well would be exactly the two-writers race that lets the
+			// displayed folders and the scanned folders drift apart.
 			media::HttpJsonClient client("127.0.0.1", media::AppProbe::kPlayerPort);
-			const media::HttpJsonClient::Json body{{"path", chosen}};
+			const media::HttpJsonClient::Json body{{"paths", folders}};
 			media::HttpJsonClient::Json reply;
 			std::string postError;
-			if (client.post("/api/media-dir", body, reply, postError)) {
-				note = "media folder set: " + chosen;
-			} else {
-				note = "saved, but the Player refused it: " + postError;
+			if (!client.post("/api/media-dir", body, reply, postError)) {
+				message += "  [warning] the Player refused it: " + postError;
 			}
 		} else {
-			note = "media folder saved (takes effect when the Player starts): " + chosen;
+			// Nobody is up, so this is the fallback writer the design allows.
+			media::config::Config current;
+			media::config::load(current);
+			current.mediaFolders = folders;
+			if (!media::config::save(current)) {
+				message += "  [warning] could not write " + media::config::configPath();
+			}
+			message += "  (takes effect when the Player starts)";
 		}
-		if (!saved) {
-			note += "  [warning] could not write " + media::config::configPath();
-		}
-		model.setMessage(note);
+
+		model.setMessage(message);
 		refresh();
 	}
 
@@ -395,8 +467,20 @@ private:
 			return snapshot;
 		}
 		snapshot.online = true;
-		if (reply.contains("mediaFolder") && reply["mediaFolder"].is_string()) {
-			snapshot.folder = reply["mediaFolder"].get<std::string>();
+		if (reply.contains("mediaFolders") && reply["mediaFolders"].is_array()) {
+			for (const auto& entry : reply["mediaFolders"]) {
+				if (entry.is_string()) {
+					snapshot.folders.push_back(entry.get<std::string>());
+				}
+			}
+		} else if (reply.contains("mediaFolder") && reply["mediaFolder"].is_string()) {
+			// An older Player answers with the singular field only. Reading it
+			// here rather than refusing keeps the launcher usable against a build
+			// that predates the list.
+			const std::string one = reply["mediaFolder"].get<std::string>();
+			if (!one.empty()) {
+				snapshot.folders.push_back(one);
+			}
 		}
 		if (reply.contains("clipCount") && reply["clipCount"].is_number_unsigned()) {
 			snapshot.clipCount = reply["clipCount"].get<std::size_t>();
@@ -429,8 +513,18 @@ struct UiState {
 	/// window keeps the launcher alive; without it, the window is the only way
 	/// to quit and must behave normally.
 	bool trayAvailable = false;
-	/// Set by QUIT in the tray menu: the only way out.
+	/// Set by QUIT in the tray menu, or by Yes in the Esc confirmation: the way
+	/// out.
 	bool quit = false;
+	/// Whether leaving should take the applications this launcher started with
+	/// it.
+	///
+	/// True for QUIT in the tray menu, which is the explicit "I am done" and
+	/// says so. FALSE for the Esc-confirmed quit, which must leave the Player
+	/// and the Controller alone: Esc is also the key that pulls the Player out of
+	/// fullscreen, so an Esc that stopped playback would be the exact thing this
+	/// change exists to prevent.
+	bool stopChildrenOnExit = true;
 };
 
 void setWindowVisible(GLFWwindow* window, bool visible) {
@@ -626,6 +720,55 @@ void handleScriptRequests(media::DashboardPanel& panel, media::ScriptLibrary& li
 			model.log("started script " + selection);
 		}
 	}
+}
+
+/// Read the Player's playlist for the Corpus tab.
+///
+/// The launcher is an HTTP client of the Player, exactly as it is of the
+/// Controller, so the list comes from the one process that owns the library
+/// rather than from a second, possibly disagreeing reading of the folder.
+///
+/// On failure the list is CLEARED rather than left standing: a stale list next
+/// to a Player that is down would read as "this is what you have", when the
+/// truth is that nobody could be asked. The status line says which.
+void refreshCorpus(media::DashboardModel& model) {
+	media::HttpJsonClient client("127.0.0.1", media::AppProbe::kPlayerPort);
+	media::HttpJsonClient::Json reply;
+	std::string error;
+	if (!client.get("/api/clips", reply, error)) {
+		model.setClipList({});
+		model.setCorpusStatus("player: " + error);
+		return;
+	}
+	if (!reply.is_array()) {
+		model.setClipList({});
+		model.setCorpusStatus("player: /api/clips did not answer with a list");
+		return;
+	}
+
+	std::vector<media::CorpusEntry> clips;
+	clips.reserve(reply.size());
+	for (const auto& item : reply) {
+		media::CorpusEntry entry;
+		if (item.contains("index") && item["index"].is_number_unsigned()) {
+			entry.index = item["index"].get<std::size_t>();
+		}
+		if (item.contains("name") && item["name"].is_string()) {
+			entry.name = item["name"].get<std::string>();
+		}
+		if (item.contains("path") && item["path"].is_string()) {
+			entry.path = item["path"].get<std::string>();
+		}
+		if (item.contains("mediaType") && item["mediaType"].is_string()) {
+			entry.mediaType = item["mediaType"].get<std::string>();
+		}
+		clips.push_back(std::move(entry));
+	}
+
+	model.setClipList(std::move(clips));
+	// The panel draws the count itself, so the status carries only what the list
+	// cannot say - which here is nothing.
+	model.setCorpusStatus(std::string());
 }
 
 } // namespace
@@ -840,6 +983,8 @@ int main(int argc, char** argv) {
 	// When the script list was last refreshed from the Controller, so the panel
 	// does not ask on every frame.
 	std::chrono::steady_clock::time_point lastScriptRefresh{};
+	// When the playlist was last read from the Player, for the Corpus tab.
+	std::chrono::steady_clock::time_point lastCorpusRefresh{};
 	std::chrono::steady_clock::time_point lastFrame = std::chrono::steady_clock::now();
 	bool wasVisible = true;
 	// Which tab the panel actually drew last frame. Starts as the requested one,
@@ -926,6 +1071,20 @@ int main(int argc, char** argv) {
 			}
 		}
 
+		// --- the playlist, for the Corpus tab -------------------------------
+		// Same reasoning as the script list above, and the same timer: a
+		// localhost GET is cheap but not free, and /api/clips returns the WHOLE
+		// playlist - on a large corpus that is a real body. Asking for it while
+		// the operator is looking at another tab would be work nobody sees, so
+		// this only runs while the Corpus tab is the one actually drawn.
+		if (visibleTab == media::DashboardPanel::Tab::Corpus) {
+			const auto now = std::chrono::steady_clock::now();
+			if (now - lastCorpusRefresh > std::chrono::seconds(2)) {
+				lastCorpusRefresh = now;
+				refreshCorpus(model);
+			}
+		}
+
 		glfwGetFramebufferSize(gWindow, &fbW, &fbH);
 		if (fbW <= 0 || fbH <= 0) {
 			glfwWaitEventsTimeout(0.05);
@@ -943,16 +1102,18 @@ int main(int argc, char** argv) {
 		visibleTab = frame.tab;
 
 		if (frame.requestQuit) {
-			if (ui.trayAvailable) {
-				// Hiding, not closing: the tray icon is how it comes back, and
-				// QUIT in its menu is the only exit.
-				glfwHideWindow(gWindow);
-			} else {
-				glfwSetWindowShouldClose(gWindow, GLFW_TRUE);
-			}
+			// Yes to the Esc confirmation. It quits the LAUNCHER and nothing
+			// else: the Player and the Controller keep running and keep answering
+			// their APIs, so a fullscreen Player is not interrupted and the
+			// session does not die to a keystroke. QUIT in the tray menu is the
+			// shutdown that takes them with it.
+			ui.stopChildrenOnExit = false;
+			ui.quit = true;
 		}
 		if (frame.action != media::DashboardAction::None) {
-			dashboard.handle(frame.action, model);
+			// actionFolder carries the folder a RemoveMediaFolder refers to; it is
+			// empty for every other action.
+			dashboard.handle(frame.action, model, frame.actionFolder);
 		}
 		handleScriptRequests(panel, scripts, document, model);
 
@@ -971,12 +1132,18 @@ int main(int argc, char** argv) {
 		glfwSwapBuffers(gWindow);
 	}
 
-	// Quit is an explicit "I am done", so it takes the applications this
-	// launcher started with it. One that someone else started is left alone:
-	// AppProbe::stop refuses anything that is not this process's child.
-	LOG_NOTICE("Dashboard") << "quitting; stopping the applications this launcher started";
-	dashboard.handle(media::DashboardAction::StopPlayer, model);
-	dashboard.handle(media::DashboardAction::StopController, model);
+	if (ui.stopChildrenOnExit) {
+		// QUIT in the tray menu is an explicit "I am done", so it takes the
+		// applications this launcher started with it. One that someone else
+		// started is left alone: AppProbe::stop refuses anything that is not this
+		// process's child.
+		LOG_NOTICE("Dashboard") << "quitting; stopping the applications this launcher started";
+		dashboard.handle(media::DashboardAction::StopPlayer, model);
+		dashboard.handle(media::DashboardAction::StopController, model);
+	} else {
+		LOG_NOTICE("Dashboard") << "quitting the launcher only; the Player and the "
+			"Controller keep running";
+	}
 
 	dashboard.stop();
 	tray.destroy();

@@ -96,7 +96,14 @@ void parse(const std::string& text, Config& out) {
 		const std::string value = unescape(trim(trimmed.substr(equals + 1)));
 
 		if (key == kKeyMediaFolder) {
-			out.mediaFolder = value;
+			// Repeated lines, one folder each, in order. An empty value is not a
+			// folder: it is what a file written with "nothing chosen" contains, so
+			// it is skipped rather than added as an empty path. That also makes a
+			// later line win over an earlier empty one, which is what a person
+			// editing the file by hand would expect.
+			if (!value.empty()) {
+				out.mediaFolders.push_back(value);
+			}
 		} else if (key == kKeyUiScale) {
 			// strtof, not stof: a malformed number must not throw out of a
 			// config load. Out-of-range values are rejected by the caller's
@@ -117,14 +124,32 @@ std::string serialize(const Config& in) {
 	out << "# vn-mediabus settings.\n"
 		<< "# Written by the Dashboard and the Controller. Safe to edit by hand.\n"
 		<< "#\n"
-		<< "# mediaFolder  the folder the Player scans for media. Empty means\n"
-		<< "#              \"use <exeDir>\\data\". A folder that does not exist is\n"
-		<< "#              not an error: the Player reports 0 clips and plays on.\n"
+		<< "# mediaFolder  one line PER FOLDER the Player reads. The corpus is the\n"
+		<< "#              merge of all of them, de-duplicated, so two folders that\n"
+		<< "#              overlap cannot list a file twice. Repeat the line to add\n"
+		<< "#              another; delete a line to drop that folder. NO line at all\n"
+		<< "#              (or an empty value) means no folder has been chosen: the\n"
+		<< "#              Player then reads only the shader library that ships with\n"
+		<< "#              it, and never falls back to <exeDir>\\data - a fresh\n"
+		<< "#              install must not silently play whatever the build shipped.\n"
+		<< "#              A folder that does not exist is skipped with a warning and\n"
+		<< "#              the others are still read. A set of folders far larger than\n"
+		<< "#              a media corpus is refused whole rather than walked, so a\n"
+		<< "#              home directory here cannot make the Player look hung.\n"
 		<< "# uiScale      extra text size multiplier on top of the monitor DPI.\n"
 		<< "#              0 or absent leaves the DPI decision alone.\n"
-		<< "\n"
-		<< kKeyMediaFolder << " = " << escape(in.mediaFolder) << "\n"
-		<< kKeyUiScale << " = " << in.uiScale << "\n";
+		<< "\n";
+	if (in.mediaFolders.empty()) {
+		// The key is still written with no value: "nothing chosen" is a real state
+		// and the file should say so rather than leaving a reader to guess whether
+		// the key is absent because it was never set.
+		out << kKeyMediaFolder << " = \n";
+	} else {
+		for (const std::string& folder : in.mediaFolders) {
+			out << kKeyMediaFolder << " = " << escape(folder) << "\n";
+		}
+	}
+	out << kKeyUiScale << " = " << in.uiScale << "\n";
 	return out.str();
 }
 

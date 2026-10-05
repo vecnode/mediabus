@@ -91,7 +91,7 @@ The robust fix, and what this repo does, is to build mpv from source against the
 ffmpeg that actually exists:
 
 ```powershell
-pwsh -File tools/build-libmpv.ps1
+pwsh -File scripts/tools/build-libmpv.ps1
 ```
 
 That produces `bin/libmpv-2.dll` plus `lib/libmpv.dll.a` and `lib/mpv/*.h`,
@@ -157,7 +157,7 @@ and compilation of `player/command.c` fails with:
 error: incomplete universal character name \U
 ```
 
-`tools/build-libmpv.ps1` therefore passes **no `--prefix`** (artefacts are
+`scripts/tools/build-libmpv.ps1` therefore passes **no `--prefix`** (artefacts are
 copied out of the build tree directly), and additionally normalises any
 remaining backslashes in the generated `config.h` as a safety net.
 

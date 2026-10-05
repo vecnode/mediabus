@@ -20,6 +20,7 @@
 #include "core/UiScale.h"
 #include "media/MediaClipLibrary.h"
 #include "media/MediaPlayerController.h"
+#include "shader/ShaderClipRenderer.h"
 
 #include <mpv/client.h>
 
@@ -75,7 +76,8 @@ void printUsage() {
 		"  --port N           control API port (default %d)\n"
 		"  --help, -h         show this text\n"
 		"\n"
-		"Keys:  H toggle HUD   F11 toggle fullscreen   Esc quit\n"
+		"Keys:  H toggle HUD   F11 toggle fullscreen   Esc leave fullscreen\n"
+		"       (Esc does not quit: close the window for that)\n"
 		"API:   http://127.0.0.1:%d  (localhost only)\n",
 		kDefaultWidth, kDefaultHeight, media::HttpControlServer::kDefaultPort,
 		media::HttpControlServer::kDefaultPort);
@@ -145,7 +147,20 @@ void onKey(GLFWwindow* window, int key, int, int action, int) {
 	auto* state = static_cast<PresentationState*>(glfwGetWindowUserPointer(window));
 	switch (key) {
 		case GLFW_KEY_ESCAPE:
-			glfwSetWindowShouldClose(window, GLFW_TRUE);
+			// Esc LEAVES FULLSCREEN. It deliberately does not quit.
+			//
+			// Quitting on Esc cost the whole session: the decoder, the control API
+			// on :8080 and whatever the Controller was doing all went with the
+			// keypress, and Esc is the reflex for "get me out of here" while
+			// watching something that filled the screen. The window's own close
+			// button is the way out of the application.
+			if (gFullscreen && state != nullptr) {
+				applyFullscreen(window, *state, false,
+					state->windowedWidth, state->windowedHeight);
+				LOG_NOTICE("App") << "Esc: left fullscreen";
+			}
+			// Windowed already: nothing to leave, so nothing happens. Doing
+			// nothing is the point - an inert Esc cannot end the session.
 			break;
 		case GLFW_KEY_H:
 			if (state != nullptr) {
@@ -187,8 +202,27 @@ void logStartup(const media::RenderDevice& device, const media::HttpControlServe
 	LOG_NOTICE("App") << "  GL version     : " << (const char*)glGetString(GL_VERSION);
 	LOG_NOTICE("App") << "  renderer       : " << (const char*)glGetString(GL_RENDERER);
 	LOG_NOTICE("App") << "  libmpv client  : " << (api >> 16) << "." << (api & 0xFFFF);
-	LOG_NOTICE("App") << "  media folder   : " << library.root();
-	LOG_NOTICE("App") << "  media found    : " << library.size() << " clip(s)";
+	LOG_NOTICE("App") << "  shader library : "
+		<< (library.hasBuiltinRoot() ? library.builtinRoot()
+			: std::string("(none found - no shader clips)"));
+	if (library.roots().empty()) {
+		LOG_NOTICE("App") << "  media folder   : (none chosen)";
+	} else {
+		// One line per folder: with several merged, a single line naming only the
+		// first is exactly the kind of half-truth that makes a missing clip hard
+		// to explain.
+		for (const std::string& folder : library.roots()) {
+			LOG_NOTICE("App") << "  media folder   : " << folder;
+		}
+	}
+	// Three states to describe, not two: nothing to walk, still walking, done.
+	if (library.scanning()) {
+		LOG_NOTICE("App") << "  media found    : scanning - "
+			<< library.scanEntries() << " entries so far, " << library.size()
+			<< " media file(s); the window is live and will load when it finishes";
+	} else {
+		LOG_NOTICE("App") << "  media found    : " << library.size() << " clip(s)";
+	}
 	LOG_NOTICE("App") << "  config file    : " << media::config::configPath();
 	LOG_NOTICE("App") << "  text scale     : "
 		<< media::ui::describeDecision(uiScale, contentScale)
@@ -284,6 +318,14 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 
+	// The shader renderer needs the GL context, which is current by now. A failure
+	// here is not fatal: the Player still plays everything else, and reports what
+	// happened when a shader clip comes up.
+	media::ShaderClipRenderer shaders;
+	if (!shaders.initialize()) {
+		LOG_WARN("App") << "shader clips are unavailable in this session";
+	}
+
 	// --- media engine ------------------------------------------------------
 	media::MPVSurface surface;
 
@@ -296,26 +338,45 @@ int main(int argc, char** argv) {
 	// surface directly would leave the controller unable to report what is on
 	// disk.
 	media::MediaClipLibrary library;
-	// The corpus folder is whatever the Dashboard (or a previous Controller
-	// session) last chose. Empty means "the default": <exeDir>/data, which is
-	// what a fresh clone has. A configured folder that no longer exists is not
-	// fatal - scan() logs it, find 0 clips, and the Player runs anyway.
-	if (!config.mediaFolder.empty()) {
-		library.setRoot(config.mediaFolder);
+
+	// The shader library is the ONE folder the operator never chose, and it is
+	// walked unconditionally, so there is always something to play even before a
+	// corpus has been picked. It is not one of the roots: setBuiltinRoot() is
+	// deliberately separate so hasRoot() stays false and nothing claims an
+	// operator chose a folder they did not.
+	library.setBuiltinRoot(media::platform::shaderDirectory());
+	if (!library.hasBuiltinRoot()) {
+		LOG_WARN("App") << "no shader library found next to the executable; "
+			<< "shader clips will not be in the playlist";
 	}
-	library.scan();
 
 	media::MediaPlayerController controller(library, &surface);
 	controller.setScripts(media::scripts::discover());
 
+	// NOTHING OF THE OPERATOR'S IS WALKED UNLESS A FOLDER WAS CHOSEN, and even
+	// then the walk is only STARTED here - pollScan() in the frame loop below
+	// carries it forward a slice at a time. Both halves matter:
+	//
+	//   - a fresh install opens instantly with only the shader library, instead of
+	//     silently playing whatever happened to ship in bin/data, so "no clips"
+	//     stops being indistinguishable from "the folder moved";
+	//   - pointing the Player at a folder far larger than a corpus - a Desktop,
+	//     a whole drive - cannot stop the window painting. That was the bug: the
+	//     walk ran to completion before the first frame, so a 536,394-file folder
+	//     produced a window that never drew, which is indistinguishable from a
+	//     hang and is exactly how "the Player will not open from the Dashboard"
+	//     presented.
+	if (config.mediaFolders.empty()) {
+		LOG_NOTICE("App") << "no media folder chosen: the playlist is the built-in "
+			<< "shader library. Add one with CHANGE... in the launcher, or POST "
+			<< "/api/media-dir";
+	}
+	// Every chosen folder, merged into one playlist by the library.
+	controller.beginStartupScan(config.mediaFolders);
+
 	const bool videoReady = surface.initialize(*device);
 	if (!videoReady) {
 		LOG_WARN("App") << "video unavailable - the control API still runs";
-	}
-
-	if (!controller.setup()) {
-		LOG_WARN("App") << "no clips loaded; put media in "
-			<< media::platform::dataDirectory();
 	}
 
 	// The API may toggle the HUD and fullscreen, but it must never touch the
@@ -333,10 +394,10 @@ int main(int argc, char** argv) {
 			presentation.windowedWidth, presentation.windowedHeight);
 		return true;
 	};
-	// Read by /api/status as "mediaFolder". Reading through the controller
-	// rather than a cached copy means the value the Controller displays is
-	// always the folder the decoder is actually pointed at.
-	hooks.getMediaFolder = [&controller] { return controller.mediaFolder(); };
+	// Read by /api/status as "mediaFolders" (and "mediaFolder", the first one).
+	// Reading through the controller rather than a cached copy means the folders
+	// the Controller displays are always the folders the decoder is pointed at.
+	hooks.getMediaFolders = [&controller] { return controller.mediaFolders(); };
 
 	media::HttpControlServer server(controller, hooks);
 	if (!server.start(options.port)) {
@@ -352,6 +413,11 @@ int main(int argc, char** argv) {
 	}
 	logStartup(*device, server, library, uiScale, hudTextScale, contentScale);
 
+	/// u_time origin for the shader clip on screen, and which clip that is. Reset
+	/// whenever the clip changes, so every shader starts at its own zero.
+	std::string shaderClipPath;
+	double shaderStartedAt = 0.0;
+
 	while (glfwWindowShouldClose(gWindow) == GLFW_FALSE) {
 		glfwPollEvents();
 
@@ -359,6 +425,11 @@ int main(int argc, char** argv) {
 		// answer. Everything that touches the decoder happens in here.
 		server.poll();
 		surface.pumpEvents();
+
+		// Carry the media walk forward, and open the first clip the moment it
+		// ends. A slice per frame is what keeps this loop free to draw, so the
+		// window stays live however large the chosen folder turns out to be.
+		controller.pollScan();
 
 		glfwGetFramebufferSize(gWindow, &fbW, &fbH);
 		if (fbW <= 0 || fbH <= 0) {
@@ -374,10 +445,34 @@ int main(int argc, char** argv) {
 
 		const media::MediaPlayerStatus status = controller.getStatus();
 
+		// A shader clip is GENERATED, not decoded: there is no mpv frame to
+		// composite, so the renderer compiles the clip's source (once, on the frame
+		// the clip changes) and fills the frame with it. Drawn first, before
+		// RenderDevice has batched anything, so the HUD lands on top.
+		if (status.isShader && status.loaded && !status.clipPath.empty()) {
+			if (status.clipPath != shaderClipPath) {
+				// Each shader starts its own clock at its own zero: u_time is
+				// "seconds since this clip was opened", not since the process
+				// started, which is what makes a clip look the same however long
+				// the Player has been up.
+				shaderClipPath = status.clipPath;
+				shaderStartedAt = glfwGetTime();
+				LOG_NOTICE("App") << "shader clip: " << status.clipPath;
+			}
+			// Called every frame by design. It compiles once per clip, and a
+			// failure is reported once rather than once per frame; the HUD says
+			// what went wrong while the previous shader stays on screen.
+			std::string shaderError;
+			shaders.load(status.clipPath, shaderError);
+			shaders.draw(fbW, fbH, glfwGetTime() - shaderStartedAt);
+		} else {
+			shaderClipPath.clear();
+		}
+
 		// Video and stills both arrive from mpv as a decoded frame in the same
 		// FBO, so one width-fit draw covers both. A held image keeps rendering
 		// because mpv is configured with image-display-duration=inf.
-		if (videoReady && surface.videoWidth() > 0) {
+		if (!status.isShader && videoReady && surface.videoWidth() > 0) {
 			const media::Rect dest = widthFitRect(
 				static_cast<float>(surface.videoWidth()),
 				static_cast<float>(surface.videoHeight()), vw, vh);
@@ -400,26 +495,49 @@ int main(int argc, char** argv) {
 			char line[320];
 			float y = pad * 0.6f;
 
-			std::snprintf(line, sizeof(line), "CLIP %d/%d  %s",
-				static_cast<int>(status.loaded ? status.clipIndex + 1 : 0),
-				static_cast<int>(status.clipCount),
-				status.clipName.empty()
-					? (status.clipCount == 0 ? "(no clips)" : "(none)")
-					: status.clipName.c_str());
+			// A running scan is REPORTED, never hidden. While the library is
+			// still being walked the count is a running total rather than an
+			// answer, and saying so is the whole difference between "working" and
+			// "hung" - the state this build used to leave the operator in.
+			if (status.scanning) {
+				std::snprintf(line, sizeof(line), "SCANNING  %d found so far",
+					static_cast<int>(status.clipCount));
+			} else if (status.scanTruncated) {
+				std::snprintf(line, sizeof(line),
+					"CLIP 0/0  (folder too large - scan refused, see the log)");
+			} else {
+				std::snprintf(line, sizeof(line), "CLIP %d/%d  %s",
+					static_cast<int>(status.loaded ? status.clipIndex + 1 : 0),
+					static_cast<int>(status.clipCount),
+					status.clipName.empty()
+						? (status.clipCount == 0 ? "(no clips)" : "(none)")
+						: status.clipName.c_str());
+			}
 			device->drawText(line, pad, y, scale, 0xFF, 0xFF, 0xFF);
 			y += lineHeight;
 
-			// Which folder the playlist came from. Without this, "0 clips" is
-			// indistinguishable from "the folder moved", which is the single
-			// most useful thing to know when the screen is empty.
-			const std::string& folder = controller.mediaFolder();
-			std::snprintf(line, sizeof(line), "DIR %s",
-				folder.empty() ? "(default)" : folder.c_str());
+			// Which folders the playlist came from, and - when there are none -
+			// what to do about it. "0 clips" alone is ambiguous between four
+			// problems with four different fixes: nothing chosen yet, a folder that
+			// moved, a folder that holds no media, and a set of folders too large to
+			// walk. Naming the situation is cheap; guessing at it is not.
+			const std::vector<std::string> folders = controller.mediaFolders();
+			if (folders.empty()) {
+				std::snprintf(line, sizeof(line),
+					"DIR (no folder chosen)  -  change it in the launcher's Applications tab");
+			} else if (folders.size() == 1) {
+				std::snprintf(line, sizeof(line), "DIR %s", folders.front().c_str());
+			} else {
+				std::snprintf(line, sizeof(line), "DIR %s  (+%d more, merged)",
+					folders.front().c_str(), static_cast<int>(folders.size() - 1));
+			}
 			device->drawText(line, pad, y, scale, 0x86, 0x96, 0xA8);
 			y += lineHeight;
 
 			std::snprintf(line, sizeof(line), "STATE %s%s",
-				status.isImage ? "IMAGE" : (status.playing ? "PLAYING" : "STOPPED"),
+				status.isShader ? "SHADER"
+					: (status.isImage ? "IMAGE"
+						: (status.playing ? "PLAYING" : "STOPPED")),
 				status.paused ? " (PAUSED)" : "");
 			device->drawText(line, pad, y, scale, 0xB0, 0xD8, 0xFF);
 			y += lineHeight;
@@ -434,10 +552,21 @@ int main(int argc, char** argv) {
 			device->drawText(line, pad, y, scale, 0xB0, 0xD8, 0xFF);
 			y += lineHeight;
 
-			std::snprintf(line, sizeof(line), "API %d  SUB %s  DEC %s",
-				server.port(),
-				status.subtitlesEnabled ? "ON" : "OFF",
-				status.decoder.empty() ? "-" : status.decoder.c_str());
+			if (status.isShader && !shaders.lastError().empty()) {
+				// The compiler's own words. This is the only line that makes a
+				// shader that will not compile fixable at all, so it wins the slot
+				// over the decoder readout - which says nothing about a shader.
+				std::snprintf(line, sizeof(line), "SHADER ERROR %s",
+					shaders.lastError().c_str());
+			} else if (status.isShader) {
+				std::snprintf(line, sizeof(line), "API %d  SHADER generated clip",
+					server.port());
+			} else {
+				std::snprintf(line, sizeof(line), "API %d  SUB %s  DEC %s",
+					server.port(),
+					status.subtitlesEnabled ? "ON" : "OFF",
+					status.decoder.empty() ? "-" : status.decoder.c_str());
+			}
 			device->drawText(line, pad, y, scale, 0x86, 0x96, 0xA8);
 
 			// Progress bar, driven by real position when the media is seekable.
@@ -460,8 +589,10 @@ int main(int argc, char** argv) {
 	}
 
 	server.stop();
-	// mpv must release its render context while the GL context is still alive.
+	// Both GL owners release while the context is still alive, and both before
+	// the device: mpv's render context and the shader programs are GL objects.
 	surface.shutdown();
+	shaders.shutdown();
 	device.reset();
 	glfwDestroyWindow(gWindow);
 	glfwTerminate();

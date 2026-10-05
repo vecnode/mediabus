@@ -104,7 +104,7 @@ void printUsage() {
 		"  --list-scripts       print discovered scripts and exit\n"
 		"  --help, -h           show this text\n"
 		"\n"
-		"Keys:  Space play/pause   R reload script   Esc quit\n"
+		"Keys:  Space play/pause   R reload script   Esc asks to quit\n"
 		"       (the arrow keys and the mouse are the interface's own)\n"
 		"API:   http://127.0.0.1:%d  (localhost only)\n",
 		kDefaultWidth, kDefaultHeight, media::ControllerHttpServer::kPlayerPort,

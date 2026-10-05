@@ -74,12 +74,12 @@ bool isInsideDirectory(const std::filesystem::path& candidate,
 
 Json statusJson(const MediaPlayerStatus& status,
 	const PresentationHooks& hooks) {
-	// The media folder is read through the same host closure as the window
+	// The media folders are read through the same host closure as the window
 	// state: main.cpp owns the render loop and the library, and this layer must
 	// not reach for either directly. Unset means "this host has no library to
-	// report", which the tests use, and which is reported as an empty string.
-	const std::string mediaFolder =
-		hooks.getMediaFolder ? hooks.getMediaFolder() : std::string();
+	// report", which the tests use, and which is reported as an empty list.
+	const std::vector<std::string> mediaFolders =
+		hooks.getMediaFolders ? hooks.getMediaFolders() : std::vector<std::string>();
 	return Json{
 		// frozen contract
 		{"loaded", status.loaded},
@@ -99,11 +99,25 @@ Json statusJson(const MediaPlayerStatus& status,
 		{"paused", status.paused},
 		{"decoder", status.decoder},
 		{"scriptsLoaded", status.scriptsLoaded},
-		// additive: where the playlist came from. The Controller draws this in
-		// its corpus rectangle, and the Dashboard checks it against the setting
-		// in mediabus.ini, so both read it from the one process that owns
-		// the library rather than from their own possibly-stale config copy.
-		{"mediaFolder", mediaFolder},
+		// additive: which clip is up, by file and by kind. `clipPath` is what a
+		// host needs to act on the file itself rather than on the decoder - the
+		// Player reads a shader's source from it - and `isShader` separates a
+		// generated clip from a still, which `isImage` cannot express.
+		{"clipPath", status.clipPath},
+		{"isShader", status.isShader},
+		// additive: where the playlist came from. `mediaFolder` stays the first
+		// chosen folder for the clients that already parse it; `mediaFolders` is
+		// the whole merged list, which is what the Dashboard draws and what makes
+		// a clip's origin explicable when several folders are in play.
+		{"mediaFolder", mediaFolders.empty() ? std::string() : mediaFolders.front()},
+		{"mediaFolders", mediaFolders},
+		// additive: a playlist walk that has not finished, so clipCount above is
+		// a partial count that is still growing. It stays a real count, so an
+		// existing parser keeps working; a client that wants the final list polls
+		// until "scanning" goes false.
+		{"scanning", status.scanning},
+		{"scanEntries", status.scanEntries},
+		{"scanTruncated", status.scanTruncated},
 		// additive: presentation the host owns. Reported as null when the host
 		// has no window (the test harness), so a client can tell "hidden" from
 		// "not applicable".
@@ -538,9 +552,13 @@ bool HttpControlServer::start(int port) {
 				return errorJson("clip source does not support rescan");
 			}
 			const std::size_t count = c.rescan();
+			// "scanning" is the honest part of this reply: a folder too large to
+			// finish inside one request budget keeps walking on the frame loop,
+			// so `count` is what is known so far rather than the final answer.
 			return Json{{"ok", true},
 				{"clipCount", count},
 				{"mediaFolder", c.mediaFolder()},
+				{"scanning", c.scanPending()},
 				{"searchLog", library->searchLog()}};
 		});
 	});
@@ -562,55 +580,99 @@ bool HttpControlServer::start(int port) {
 	server->Get("/api/media-dir", [this, guard, dispatch](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		dispatch(res, [](MediaPlayerController& c) -> Json {
+			const MediaPlayerStatus status = c.getStatus();
+			const std::vector<std::string> folders = c.mediaFolders();
 			return Json{{"ok", true},
-				{"mediaFolder", c.mediaFolder()},
-				{"clipCount", c.getClips().size()}};
+				// `mediaFolder` first for the clients that already parse it, then
+				// the whole merged list, which is what the Dashboard draws.
+				{"mediaFolder", folders.empty() ? std::string() : folders.front()},
+				{"mediaFolders", folders},
+				// Taken from the status rather than from a built playlist:
+				// getClips() would copy every entry just to be counted, which on a
+				// large corpus is real work for one integer.
+				{"clipCount", status.clipCount},
+				{"scanning", status.scanning},
+				{"scanEntries", status.scanEntries},
+				{"scanTruncated", status.scanTruncated}};
 		});
 	});
 
+	// Replace the set of folders the corpus is merged from.
+	//
+	// Two body shapes, both of which replace the whole list rather than editing
+	// it: {"path": "<one folder>"} for the single-folder clients and for curl, and
+	// {"paths": ["<a>", "<b>"]} for the Dashboard. "" and [] both mean "nothing
+	// chosen". Add and remove are expressed by sending the new list, which keeps
+	// the route idempotent: a retried request produces the state it describes
+	// rather than toggling.
 	server->Post("/api/media-dir", [this, guard, dispatch, parseBody](const httplib::Request& req, httplib::Response& res) {
 		if (!guard(req, res)) return;
 		Json body;
 		if (!parseBody(req, res, body)) return;
-		if (!body.contains("path") || !body["path"].is_string()) {
+
+		std::vector<std::string> requested;
+		if (body.contains("paths") && body["paths"].is_array()) {
+			for (const auto& entry : body["paths"]) {
+				if (entry.is_string()) {
+					requested.push_back(entry.get<std::string>());
+				}
+			}
+		} else if (body.contains("path") && body["path"].is_string()) {
+			const std::string one = body["path"].get<std::string>();
+			if (!one.empty()) {
+				requested.push_back(one);
+			}
+		} else {
 			res.status = 400;
-			res.set_content(errorJson("expected {\"path\": \"<folder>\"}").dump(),
+			res.set_content(errorJson(
+				"expected {\"path\": \"<folder>\"} or {\"paths\": [\"<folder>\", ...]}").dump(),
 				"application/json");
 			return;
 		}
-		std::string requested = body["path"].get<std::string>();
 
+		// Validate before touching the library, so a bad list changes nothing:
+		// half-applying a multi-folder edit would leave the operator with a corpus
+		// that matches neither what they had nor what they asked for.
 		std::error_code ec;
-		if (!requested.empty()) {
+		for (std::string& entry : requested) {
+			if (entry.empty()) {
+				continue;
+			}
 			// Tolerate forward slashes from a hand-written request; the library
 			// compares and reports preferred separators itself.
-			requested = std::filesystem::path(requested).make_preferred().string();
-			if (!std::filesystem::is_directory(requested, ec)) {
+			entry = std::filesystem::path(entry).make_preferred().string();
+			if (!std::filesystem::is_directory(entry, ec)) {
 				res.status = 400;
-				res.set_content(errorJson("not a folder: " + requested).dump(),
+				res.set_content(errorJson("not a folder: " + entry).dump(),
 					"application/json");
 				return;
 			}
 		}
 
 		dispatch(res, [this, requested](MediaPlayerController& c) -> Json {
-			const std::size_t count = c.setMediaFolder(requested);
-			const std::string actual = c.mediaFolder();
+			const std::size_t count = c.setMediaFolders(requested);
+			const std::vector<std::string> actual = c.mediaFolders();
 
 			// Persist so the choice survives a restart. A failed write is
 			// reported but does not undo the change: the playlist has already
 			// moved, and pretending otherwise would be worse than a warning.
 			config::Config stored;
 			config::load(stored);
-			stored.mediaFolder = actual;
+			stored.mediaFolders = actual;
 			const bool persisted = config::save(stored);
 
 			Json payload = okWithStatus(c, impl_->hooks);
 			payload["clipCount"] = count;
-			payload["mediaFolder"] = actual;
+			payload["mediaFolders"] = actual;
+			payload["mediaFolder"] = actual.empty() ? std::string() : actual.front();
 			payload["persisted"] = persisted;
+			// Mirrors GET /api/media-dir: a set too large to finish inside one
+			// request budget is still being walked, so the count above is partial
+			// rather than empty - the difference between "no media here" and
+			// "still looking".
+			payload["scanning"] = c.scanPending();
 			if (!persisted) {
-				payload["warning"] = "folder changed, but " + config::configPath()
+				payload["warning"] = "folders changed, but " + config::configPath()
 					+ " could not be written; it will not survive a restart";
 			}
 			return payload;

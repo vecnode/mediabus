@@ -25,8 +25,8 @@
 
 $ErrorActionPreference = 'Stop'
 
-# This script lives in tools/, so the repository root is its parent.
-$Repo = Split-Path $PSScriptRoot -Parent
+# This script lives in scripts/tools/, so the repository root is two levels up.
+$Repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Bin = Join-Path $Repo 'bin'
 $Curl = (Get-Command curl.exe).Source
 
@@ -141,13 +141,23 @@ try {
 
     # A video, so the position actually advances: a still image has no timeline
     # by design and would prove nothing about playback. The index is looked up
-    # rather than hard-coded, because the playlist is whatever media is in
-    # bin/data (the library sorts images before videos, so the video is last
+    # rather than hard-coded, because the playlist is whatever media is in the
+    # chosen folder (the library sorts images before videos, so the video is last
     # here, but nothing guarantees that on another machine).
+    #
+    # The folder is CHOSEN here rather than assumed. The Player deliberately
+    # scans nothing until one is picked - a fresh install must not silently play
+    # whatever happens to ship in bin/data - so this check cannot rely on ambient
+    # media, and setting it through the API also exercises the route the
+    # Dashboard's folder picker uses.
+    $setDirBody = @{ path = (Join-Path $Bin 'data') } | ConvertTo-Json -Compress
+    Say "player media folder        : $((Post-Json "http://127.0.0.1:$PlayerPort/api/media-dir" $setDirBody) | ConvertTo-Json -Compress -Depth 2)"
+    Start-Sleep -Milliseconds 800
+
     $clips = Get-Json "http://127.0.0.1:$PlayerPort/api/clips"
     $video = $clips | Where-Object { $_.mediaType -eq 'video' } | Select-Object -First 1
     if ($null -eq $video) {
-        Check 'player position advances' $false 'no video clip in bin/data to play'
+        Check 'player position advances' $false "no video clip in $(Join-Path $Bin 'data') to play"
     } else {
         Say "player open the video     : $((Post-Json "http://127.0.0.1:$PlayerPort/api/clips/$($video.index)" '{}') | ConvertTo-Json -Compress -Depth 2)"
         # Resume explicitly: a freshly opened clip may still be paused, and a

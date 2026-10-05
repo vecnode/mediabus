@@ -16,31 +16,16 @@ rem   run-controller.bat --start-offline
 rem ---------------------------------------------------------------------------
 setlocal
 call "%~dp0_bin-dir.bat"
+if errorlevel 1 exit /b 1
 
-set "EXE=%BIN%\vn-mediabus-controller.exe"
-set "LOG=%BIN%\controller.log"
+set "APP_EXE=%BIN%\vn-mediabus-controller.exe"
+set "APP_LOG=%BIN%\controller.log"
+set "APP_STDERR_ONLY=0"
+set "APP_ARGS=%*"
 
-if not exist "%EXE%" (
-    echo.
-    echo Not built yet: "%EXE%"
-    echo Run scripts\build.bat first.
-    echo.
-    pause
-    exit /b 1
-)
-
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%EXE%' -ArgumentList '%*' -WorkingDirectory '%BIN%' -RedirectStandardOutput '%LOG%' -RedirectStandardError '%LOG.err'"
-
-timeout /t 2 /nobreak >nul 2>&1
-tasklist /fi "imagename eq vn-mediabus-controller.exe" 2>nul | find /i "vn-mediabus-controller.exe" >nul
-if errorlevel 1 (
-    echo.
-    echo The Controller did not start. Read "%LOG%" and "%LOG%.err" - they say why.
-    echo.
-    pause
-    exit /b 1
-)
+call "%~dp0_start-app.bat"
+if errorlevel 1 exit /b 1
 
 echo vn-mediabus-controller is running. API: http://127.0.0.1:8081
-echo   log: %LOG%
+echo   log: %APP_LOG%
 exit /b 0

@@ -13,7 +13,7 @@ player with a localhost HTTP control API, an ImGui control panel that drives it,
 and a launcher that starts and supervises both — with a Lua editor built in.
 
 > **Status:** all three build from this tree, run side by side, and talk to each
-> other over HTTP — verified on this machine by `tools/verify-live.ps1`
+> other over HTTP — verified on this machine by `scripts/tools/verify-live.ps1`
 > (31/31 checks) and by `bin/vn-mediabus-tests.exe` (525 checks, 0 failures). The
 > openFrameworks tree, the OCR/corpus layer and the `ytdl` integration are
 > **removed**. See [Known issues](#known-issues) for what is not proven yet.
@@ -90,7 +90,7 @@ straight through (`scripts\build.bat -Clean` works):
 
 ```powershell
 # 1. one-time: build libmpv against the ffmpeg installed on this machine
-pwsh -File tools/build-libmpv.ps1
+pwsh -File scripts/tools/build-libmpv.ps1
 
 # 2. build all three applications and the test binary
 pwsh -File scripts/build.ps1
@@ -118,7 +118,7 @@ with `STATUS_ENTRYPOINT_NOT_FOUND`, printing nothing at all. See
 
 ## Verified live
 
-`tools/verify-live.ps1` starts the Player, drives it over its own API, starts the
+`scripts/tools/verify-live.ps1` starts the Player, drives it over its own API, starts the
 Controller and checks that its commands actually reach the Player, then starts
 the Dashboard. It cleans up whatever it started and exits non-zero if any check
 fails. Last run on this machine:
@@ -357,7 +357,7 @@ script reads as a sequence of steps spread across frames.
 ## Release bundle
 
 ```powershell
-pwsh -File tools/package_release.ps1
+pwsh -File scripts/tools/package_release.ps1
 ```
 
 Assembles `dist/vn-mediabus/` with all three executables, the script
@@ -392,17 +392,16 @@ Behaviour is deliberately constrained:
 cd bin; .\vn-mediabus-tests.exe
 
 # live: starts real windows and checks the three applications against each other
-powershell -File tools\verify-live.ps1
+powershell -File scripts/tools\verify-live.ps1
 
 # the launcher's tray plumbing: hide-on-close, one instance, QUIT, and the
 # no-icon fallback that keeps the process reachable
-powershell -File tools\verify-launcher.ps1
+powershell -File scripts/tools/verify-launcher.ps1
 ```
 
-`tools/soak.ps1` and `tools/stress-switch.ps1` measure memory and thread growth
-over a long run and hammer rapid clip switching; `p0/build.ps1 <file>` builds and
-runs the standalone audio probe, which reports `current-ao` and `audio-pts`
-without needing a window.
+`scripts/tools/soak.ps1` and `scripts/tools/stress-switch.ps1` measure memory and
+thread growth over a long run and hammer rapid clip switching, without needing a
+window.
 
 ## Repository layout
 
@@ -413,24 +412,26 @@ scripts/run-controller.bat    start only the Controller
 scripts/run-dashboard.bat     start only the launcher, window shown
 scripts/build.bat             build everything on Windows
 scripts/build.ps1             the build itself (PATH confinement, DLL staging)
-scripts/media-player.lua      reference Player script, installed into bin/data
-scripts/controller-example.lua reference Controller script, installed likewise
-src/main.cpp                  Player: window, frame loop, wiring
-src/controller_main.cpp       Controller: bar window, input, Lua host wiring
-src/dashboard_main.cpp        Launcher: window, tray, probe thread, frame loop
-src/app/HttpControlServer     the Player's control plane
-src/app/control/              Controller: model, view, PlayerClient, Lua host, its API
-src/app/dashboard/            Launcher: model, view, AppProbe, TrayIcon
-src/app/http/                 shared HTTP/JSON client and the submit-and-poll queue
-src/app/render/               RenderDevice + the one OpenGL implementation
-src/app/hud/                  bitmap font, DPI scale, the native folder picker
-src/backends/mpv/             MPVSurface: the only file that attaches mpv to GL
-src/core/                     logging, platform paths, UiScale, AppConfig
-src/media/                    playlist, playback controller, script discovery
+scripts/_bin-dir.bat          locate bin/ for the four run*.bat wrappers
+scripts/_start-app.bat        launch one app detached, then confirm it came up
+scripts/tools/                build, package, soak, stress, screenshot, verify
+data/                         reference Lua scripts, installed into bin/data by the build
+assets/icon/                  the application icon
+assets/shaders/               fragment shaders played as generated clips
+apps/player/main.cpp          Player: window, frame loop, wiring
+apps/controller/              Controller: main + view
+apps/dashboard/               Launcher: main + view
+libs/core/                    logging, platform paths, UiScale, AppConfig
+libs/media/                   playlist, playback controller, script discovery
+libs/net/                     the Player's HTTP control plane and the JSON client
+libs/control/                 Dashboard/Controller models, AppProbe, Lua host, both APIs
+libs/gfx/                     RenderDevice + the one OpenGL implementation, bitmap font
+libs/mpv/                     MPVSurface: the file that attaches mpv to GL
+libs/shader/                  ShaderClipRenderer: the shader-clip GL exception
+libs/ui/                      the Dear ImGui fence (UiLayer) and its widgets
+libs/win32/                   TrayIcon and FolderPicker, the only Win32
 tests/                        the headless suite
-tools/                        build, package, soak, stress and verify scripts
-p0/                           standalone libmpv audio probe
-scripts/                      reference scripts (installed into bin/data by the build)
+vendor/                       vendored libmpv, Dear ImGui, cpp-httplib, nlohmann/json
 ```
 
 **The `RenderDevice` rule (hard):** nothing above `src/app/render/` may name a
@@ -442,13 +443,13 @@ sanctioned exception, because it must attach mpv's output to a GL texture.
 ## Known issues
 
 **An unexplained crash under sustained load.** A 10-minute instrumented soak
-(`tools/soak.ps1`, 1560 HTTP requests) died at 443s with no error output, the
+(`scripts/tools/soak.ps1`, 1560 HTTP requests) died at 443s with no error output, the
 last log line being `VO: [libmpv] 1400x2000 rgba`. What is known: 0 request
 failures across all 1560 calls; thread count fell 55 → 49 and handles 1379 →
 1370, so no thread/handle leak; RSS crept 188.8 → 194.6 MB over 7.4 minutes
 (~0.8 MB/min), plateauing rather than running away.
 
-It is **not reproducible on demand**: `tools/stress-switch.ps1` survived 600
+It is **not reproducible on demand**: `scripts/tools/stress-switch.ps1` survived 600
 rapid clip switches. Next step if it recurs: capture a dump (`procdump` or
 Windows Error Reporting) and read the faulting module — that distinguishes an
 mpv bug from ours.

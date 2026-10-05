@@ -9,41 +9,26 @@ rem
 rem The Player owns the decoder, the window and the control API on :8080.
 rem Its log goes to bin\player.log.
 rem
+rem The Player starts with NO clips: it only scans a folder that has been chosen
+rem in the Dashboard or the Controller (recorded in bin\mediabus.ini). With no
+rem folder chosen it opens instantly, empty, and says so on its HUD.
+rem
 rem Extra arguments are passed through:
 rem   run-player.bat --fullscreen
 rem   run-player.bat --width 1280 --height 720
 rem ---------------------------------------------------------------------------
 setlocal
 call "%~dp0_bin-dir.bat"
+if errorlevel 1 exit /b 1
 
-set "EXE=%BIN%\vn-mediabus-player.exe"
-set "LOG=%BIN%\player.log"
+set "APP_EXE=%BIN%\vn-mediabus-player.exe"
+set "APP_LOG=%BIN%\player.log"
+set "APP_STDERR_ONLY=0"
+set "APP_ARGS=%*"
 
-if not exist "%EXE%" (
-    echo.
-    echo Not built yet: "%EXE%"
-    echo Run scripts\build.bat first.
-    echo.
-    pause
-    exit /b 1
-)
-
-rem The Player is a console-subsystem binary that draws its own window, so it is
-rem started detached with its diagnostics in a log rather than tying up this
-rem console. -NoNewWindow is deliberately NOT used: it would attach the Player to
-rem this shell and block until the Player exits.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%EXE%' -ArgumentList '%*' -WorkingDirectory '%BIN%' -RedirectStandardOutput '%LOG%' -RedirectStandardError '%LOG.err'"
-
-timeout /t 2 /nobreak >nul 2>&1
-tasklist /fi "imagename eq vn-mediabus-player.exe" 2>nul | find /i "vn-mediabus-player.exe" >nul
-if errorlevel 1 (
-    echo.
-    echo The Player did not start. Read "%LOG%" and "%LOG%.err" - they say why.
-    echo.
-    pause
-    exit /b 1
-)
+call "%~dp0_start-app.bat"
+if errorlevel 1 exit /b 1
 
 echo vn-mediabus-player is running. Control API: http://127.0.0.1:8080
-echo   log: %LOG%
+echo   log: %APP_LOG%
 exit /b 0

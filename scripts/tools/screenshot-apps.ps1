@@ -7,8 +7,8 @@
 #
 # It is a verification tool, not part of the build. Run it by hand:
 #
-#     pwsh -File tools/screenshot-apps.ps1
-#     pwsh -File tools/screenshot-apps.ps1 -Out bin/shots -ControllerOnly
+#     pwsh -File scripts/tools/screenshot-apps.ps1
+#     pwsh -File scripts/tools/screenshot-apps.ps1 -Out bin/shots -ControllerOnly
 #
 # The screenshots land in <repo>/bin/shots by default, which is git-ignored.
 
@@ -20,8 +20,20 @@ param(
     [switch]$DashboardOnly,
     # Which Dashboard tab to photograph. The Scripts tab only has content when
     # the Controller is up, so asking for it also starts one.
-    [ValidateSet('applications', 'scripts', 'activity')]
+    [ValidateSet('applications', 'corpus', 'scripts', 'activity')]
     [string]$Tab = 'applications',
+    # Press Esc in the Dashboard before capturing, to photograph the Yes/No quit
+    # confirmation. A modal is a state no assertion can check, so it gets a
+    # picture like everything else here.
+    [switch]$Escape,
+    # Start a Player too. The Corpus tab reads its playlist from the Player, so
+    # without one it can only show the honest "not running" state.
+    [switch]$WithPlayer,
+    # Folder to hand the Player through /api/media-dir, so the Corpus tab has
+    # something to list. Empty leaves whatever mediabus.ini already holds. Note
+    # that this PERSISTS, because the Player is the single writer of that setting
+    # - send {"path":""} afterwards to leave the machine with nothing chosen.
+    [string]$CorpusFolder = '',
     # Wait this long after a window appears before capturing it, so ImGui has
     # laid out and the first frame has been presented.
     [int]$SettleSeconds = 3
@@ -29,7 +41,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$Repo = Split-Path -Parent $PSScriptRoot
+$Repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Bin = Join-Path $Repo 'bin'
 if ([string]::IsNullOrWhiteSpace($Out)) {
     $Out = Join-Path $Bin 'shots'
@@ -41,6 +53,29 @@ New-Item -ItemType Directory -Force -Path $Out | Out-Null
 # session and is not over some remote sessions - so this reports that clearly
 # rather than writing a black rectangle.
 Add-Type -AssemblyName System.Drawing
+
+# Become DPI aware BEFORE anything is measured or captured.
+#
+# The applications are per-monitor DPI aware, so on a scaled display their windows
+# are sized in PHYSICAL pixels: a 1040x760 layout at 150% is a 1040x760 window.
+# This script is not aware, so GetClientRect hands it VIRTUALISED coordinates
+# (693x506) while PrintWindow fills the bitmap with physical ones - and the capture
+# comes out as a crop of the window's top-left corner. That reads exactly like an
+# interface bug (a centred dialog appearing clipped off the right edge) which is
+# not there, so it is worth the two lines to prevent.
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public class ShotDpi {
+    [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+}
+'@
+# DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 is the pseudo-handle -4.
+$dpiAware = [ShotDpi]::SetProcessDpiAwarenessContext([IntPtr](-4))
+if (-not $dpiAware) {
+    Write-Warning 'could not become DPI aware; captures on a scaled display will be cropped'
+}
+
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -159,6 +194,25 @@ function Save-WindowShot {
     return $true
 }
 
+# Raise an application's window, press Esc in it and let the modal lay out, so the
+# capture that follows photographs a state no assertion can reach. The handle is
+# read fresh rather than taken from the object Start-Process returned: a Process
+# captured at spawn time can still report a zero MainWindowHandle.
+function Send-EscapeTo {
+    param([string]$ProcessName, [string]$Label)
+    $win = (Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
+        Select-Object -First 1).MainWindowHandle
+    if (-not $win -or $win -eq [IntPtr]::Zero) {
+        Write-Warning "$Label : no window to send Esc to"
+        return
+    }
+    Add-Type -AssemblyName System.Windows.Forms
+    [WinCap]::Raise($win) | Out-Null
+    Start-Sleep -Milliseconds 500
+    [System.Windows.Forms.SendKeys]::SendWait('{ESC}')
+    Start-Sleep -Milliseconds 900
+}
+
 # Nothing of ours should already be running, or the capture would grab the wrong
 # window and the port checks inside the apps would fight over 8080/8081.
 Get-Process -Name 'vn-mediabus-*' -ErrorAction SilentlyContinue |
@@ -179,23 +233,58 @@ try {
         Start-Sleep -Seconds 2
     }
 
+    if ($WithPlayer) {
+        $player = Start-Process -FilePath (Join-Path $Bin 'vn-mediabus-player.exe') `
+            -WorkingDirectory $Bin `
+            -RedirectStandardError (Join-Path $Out 'player.err') -PassThru
+        $started += $player.Id
+        Start-Sleep -Seconds 4
+
+        if ($CorpusFolder) {
+            # Through the Player's own API rather than by editing mediabus.ini
+            # behind its back: the Player is the single writer of this setting, and
+            # a second writer is exactly how the displayed folder and the scanned
+            # folder start disagreeing.
+            try {
+                Invoke-RestMethod -Method Post `
+                    -Uri 'http://127.0.0.1:8080/api/media-dir' `
+                    -ContentType 'application/json' `
+                    -Body (@{ path = $CorpusFolder } | ConvertTo-Json) | Out-Null
+                Start-Sleep -Seconds 1
+            } catch {
+                Write-Warning "could not point the Player at $CorpusFolder : $_"
+            }
+        }
+    }
+
     if (-not $ControllerOnly) {
         $dash = Start-Process -FilePath (Join-Path $Bin 'vn-mediabus-dashboard.exe') `
             -ArgumentList "--no-tray --tab $Tab" -WorkingDirectory $Bin `
             -RedirectStandardError (Join-Path $Out 'dashboard.err') -PassThru
         $started += $dash.Id
         Start-Sleep -Seconds 3
+
+        if ($Escape) {
+            Send-EscapeTo -ProcessName 'vn-mediabus-dashboard' -Label "dashboard/$Tab"
+        }
     }
 
     if (-not $ControllerOnly) {
+        $shotName = if ($Escape) { 'dashboard-esc.png' } else { 'dashboard.png' }
+        $shotLabel = if ($Escape) { "dashboard/$Tab + Esc" } else { "dashboard/$Tab" }
         Save-WindowShot -ProcessName 'vn-mediabus-dashboard' `
-            -FileName 'dashboard.png' -Label "dashboard/$Tab" | Out-Null
+            -FileName $shotName -Label $shotLabel | Out-Null
     }
     if (-not $DashboardOnly) {
         # With --start-offline the Controller shows the offline state, which is
         # the honest picture of a Controller whose Player is not up.
+        if ($Escape) {
+            Send-EscapeTo -ProcessName 'vn-mediabus-controller' -Label 'controller'
+        }
+        $ctrlName = if ($Escape) { 'controller-esc.png' } else { 'controller.png' }
+        $ctrlLabel = if ($Escape) { 'controller + Esc' } else { 'controller' }
         Save-WindowShot -ProcessName 'vn-mediabus-controller' `
-            -FileName 'controller.png' -Label 'controller' | Out-Null
+            -FileName $ctrlName -Label $ctrlLabel | Out-Null
     }
 
     Write-Host ""

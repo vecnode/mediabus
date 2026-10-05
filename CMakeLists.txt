@@ -17,8 +17,8 @@ project(vn-mediabus LANGUAGES CXX)
 #
 # libmpv is NOT taken from MSYS2: that package is built against a libavcodec one
 # patch newer than the ffmpeg installed here and fails at load. It is built from
-# source by tools/build-libmpv.ps1 and vendored into vendor/libmpv + bin/.
-# See docs/building.md.
+# source by scripts/tools/build-libmpv.ps1 and vendored into vendor/libmpv + bin/.
+# See BUILDING.md.
 # ---------------------------------------------------------------------------
 
 set(CMAKE_CXX_STANDARD 17)
@@ -53,7 +53,7 @@ if(NOT EXISTS ${CMAKE_SOURCE_DIR}/vendor/libmpv/include/mpv/client.h OR
    NOT EXISTS ${CMAKE_SOURCE_DIR}/vendor/libmpv/lib/libmpv.dll.a)
     message(FATAL_ERROR
         "Vendored libmpv not found.\n"
-        "Run:  pwsh -File tools/build-libmpv.ps1\n"
+        "Run:  pwsh -File scripts/tools/build-libmpv.ps1\n"
         "It builds mpv against the installed ffmpeg into bin/ and vendor/libmpv/.")
 endif()
 
@@ -166,6 +166,18 @@ if(MEDIA_BUILD_APP)
     add_library(vn-mediabus::mpv-surface ALIAS mediabus_mpv_surface)
 endif()
 
+# ShaderClipRenderer: the SECOND file allowed to name OpenGL, for the same reason
+# MPVSurface is the first - it owns GL objects RenderDevice has no vocabulary for.
+# RenderDevice is a 2D compositor; a fragment-shader clip is neither a quad nor a
+# texture, and compiling GLSL does not belong on the seam whose whole job is to
+# keep the graphics API behind it. Its header names no GL symbol, so the rule
+# still holds for every application file. Only the Player links it.
+if(MEDIA_BUILD_APP)
+    add_library(mediabus_shader STATIC libs/shader/ShaderClipRenderer.cpp)
+    target_link_libraries(mediabus_shader PUBLIC mediabus_gfx)
+    add_library(vn-mediabus::shader ALIAS mediabus_shader)
+endif()
+
 # Windows shell integration: the tray icon and the folder picker. The only Win32
 # in the project, and the only reason shell32 is linked.
 if(WIN32 AND (MEDIA_BUILD_CONTROLLER OR MEDIA_BUILD_DASHBOARD))
@@ -178,7 +190,7 @@ if(WIN32 AND (MEDIA_BUILD_CONTROLLER OR MEDIA_BUILD_DASHBOARD))
 endif()
 
 # ---------------------------------------------------------------------------
-# Dear ImGui, vendored and pinned (see vendor/imgui/VERSION and docs/architecture.md).
+# Dear ImGui, vendored and pinned (see vendor/imgui/IMGUI_VERSION.txt).
 #
 # The OpenGL3 backend uses its own bundled gl3w-derived loader, which is
 # file-local and does not collide with GLEW. Do NOT define
@@ -190,7 +202,7 @@ if(MEDIA_BUILD_CONTROLLER OR MEDIA_BUILD_DASHBOARD)
     if(NOT EXISTS ${CMAKE_SOURCE_DIR}/vendor/imgui/imgui.cpp)
         message(FATAL_ERROR
             "Vendored Dear ImGui not found at vendor/imgui.\n"
-            "Run:  pwsh -File tools/fetch-imgui.ps1")
+            "Run:  pwsh -File scripts/tools/fetch-imgui.ps1")
     endif()
 
     add_library(imgui STATIC
@@ -239,7 +251,7 @@ if(MEDIA_BUILD_APP)
         set_target_properties(vn-mediabus-player PROPERTIES WIN32_EXECUTABLE TRUE)
     endif()
     target_link_libraries(vn-mediabus-player PRIVATE
-        mediabus_net mediabus_mpv_surface)
+        mediabus_net mediabus_mpv_surface mediabus_shader)
     if(WIN32)
         target_link_libraries(vn-mediabus-player PRIVATE gdi32 ole32 uuid)
     endif()
@@ -358,7 +370,7 @@ else()
 endif()
 
 foreach(target mediabus_core mediabus_net mediabus_control mediabus_gfx
-        mediabus_mpv mediabus_win32 mediabus_ui imgui
+        mediabus_mpv mediabus_shader mediabus_win32 mediabus_ui imgui
         vn-mediabus-player vn-mediabus-controller vn-mediabus-dashboard
         vn-mediabus-tests)
     if(TARGET ${target})

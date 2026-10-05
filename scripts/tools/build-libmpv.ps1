@@ -32,7 +32,7 @@ Remove-Item Env:MINGW_PREFIX -ErrorAction SilentlyContinue
 $env:CC  = 'gcc'
 $env:CXX = 'g++'
 
-$Repo    = Split-Path -Parent $PSScriptRoot
+$Repo    = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Cache   = Join-Path $Repo '.cache'
 $Work    = Join-Path $Cache "mpv-$MpvVersion"
 $Tarball = Join-Path $Cache "mpv-$MpvVersion.tar.gz"

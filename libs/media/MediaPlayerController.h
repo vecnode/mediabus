@@ -34,6 +34,31 @@ struct MediaPlayerStatus {
 	bool paused = false;
 	std::string decoder;
 	std::vector<std::string> scriptsLoaded;
+
+	// --- additive: the playlist rebuild, which can outlive one frame ---
+	/// True while the library is still being walked, so clipCount above is a
+	/// PARTIAL count that will grow. It stays a real count so an existing parser
+	/// keeps working; a client that wants the final list polls until this is
+	/// false.
+	bool scanning = false;
+	/// Entries examined by the walk so far, for a progress readout.
+	std::size_t scanEntries = 0;
+	/// True when the walk hit the library's runaway guard and stopped early, so
+	/// the list is final but incomplete.
+	bool scanTruncated = false;
+
+	/// Absolute path of the current clip, empty when nothing is loaded.
+	///
+	/// Needed by a host that has to act on the FILE rather than on the decoder:
+	/// the Player reads a shader clip's source from here before compiling it, and
+	/// there is no other way to ask - clipName is a display name and need not be
+	/// unique across merged folders.
+	std::string clipPath;
+	/// True when the current clip is a generated shader rather than decoded
+	/// media. Deliberately NOT reported through `isImage`: a shader is not a
+	/// still, and conflating the two would make a third kind of clip
+	/// unrepresentable.
+	bool isShader = false;
 };
 
 /// One entry in the playlist exposed over HTTP.
@@ -161,22 +186,71 @@ public:
 
 	/// Re-scan the current clip source in place, keeping the folder the library
 	/// was already pointed at. Returns the number of clips found.
+	///
+	/// Completes synchronously when the walk fits inside ScanBudget::perRequest()
+	/// - which every real corpus does, and which is what keeps the returned count
+	/// final for the routes and tests that depend on it. A folder too large for
+	/// that budget keeps walking on pollScan() instead of blocking here, and
+	/// scanPending() reports it, so a request can never hang the window.
 	std::size_t rescan();
 
 	/// Point the library at `directory` and reload. Returns the number of clips
 	/// found there.
 	///
-	/// An empty `directory` means "back to the library's own default", i.e. the
-	/// Player's data folder. A folder that does not exist is not an error: it
-	/// scans to nothing, the playlist is cleared below, and the Player keeps
-	/// running with 0 clips - the state the Controller reports as NO CLIPS.
+	/// An empty `directory` means "no folder chosen": the library falls back to
+	/// its own default root but nothing is walked, the playlist is empty, and the
+	/// Player keeps running with 0 clips - the state the Controller reports as
+	/// NO CLIPS.
+	///
+	/// Like rescan(), a walk too large for one request budget finishes on
+	/// pollScan() rather than blocking the caller.
 	///
 	/// Only meaningful when the clip source is a MediaClipLibrary; any other
 	/// source keeps its existing root and is merely rescanned. That keeps the
 	/// interface honest for the test double without a dynamic cast here.
+	/// Set the folders to merge and reload. An empty list means nothing is
+	/// chosen: nothing of the operator's is walked, the playlist is emptied to
+	/// just the built-in shader library, and the Player keeps running - the state
+	/// the Controller reports as NO CLIPS.
+	///
+	/// A folder that does not exist is skipped with a warning and the others are
+	/// still read. A set far larger than a media corpus is refused whole.
+	std::size_t setMediaFolders(const std::vector<std::string>& directories);
+
+	/// Convenience for the single-folder case: replaces the whole list.
 	std::size_t setMediaFolder(const std::string& directory);
 
-	/// Where media is being read from, for status and diagnostics.
+	/// Advance a playlist walk that did not finish inside rescan() or
+	/// setMediaFolder(). Call once per frame from the render loop.
+	///
+	/// Returns true when this call COMPLETED a walk, which is the moment the
+	/// playlist became final and the first clip was opened. Never blocks for more
+	/// than one frame's budget: a window that keeps painting cannot be mistaken
+	/// for a hang, whatever folder the operator points it at.
+	bool pollScan();
+
+	/// Point the library at the startup folder and START walking it, opening
+	/// nothing.
+	///
+	/// For a host whose backend is not initialized yet: all this does is set the
+	/// root and hand the walk to the frame loop, which is what stops a large
+	/// folder from delaying the first frame. pollScan() opens the first clip when
+	/// the walk ends. An empty `directory` means no folder was chosen, and
+	/// nothing is walked at all.
+	void beginStartupScan(const std::string& directory);
+
+	/// The multi-root form of beginStartupScan(): every folder to merge.
+	void beginStartupScan(const std::vector<std::string>& directories);
+
+	/// True while the playlist is still being walked, i.e. getStatus().clipCount
+	/// is a partial count.
+	bool scanPending() const;
+
+	/// Every folder being merged, in order. Empty means nothing was chosen.
+	std::vector<std::string> mediaFolders() const;
+
+	/// The first folder being merged, or empty. For the callers that have exactly
+	/// one folder to name - prefer mediaFolders().
 	std::string mediaFolder() const;
 
 	/// Diagnostics: where the playlist came from.
@@ -194,12 +268,22 @@ private:
 	/// Subtitle text for the current clip: an explicit override wins, otherwise
 	/// the backend/embedded track is reported.
 	void syncSubtitleText();
+	/// Begin a walk of the library's current root and take one bounded slice of
+	/// it. Shared by rescan() and setMediaFolder() so the two cannot disagree
+	/// about when the walk is finished or what finishing it means. Returns true
+	/// when the walk completed inside this call.
+	bool beginScan();
 
 	IClipSource& clips_;
 	IPlaybackBackend* backend_ = nullptr;
 
 	std::size_t currentIndex_ = 0;
 	bool loaded_ = false;
+
+	/// A walk is running and the playlist still has to be opened once it ends.
+	/// Set by beginScan() when the walk outlives one call; cleared by the
+	/// pollScan() that completes it.
+	bool scanSetupPending_ = false;
 
 	std::vector<scripts::ScriptFile> scripts_;
 

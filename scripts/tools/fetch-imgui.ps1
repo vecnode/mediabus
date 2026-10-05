@@ -8,9 +8,9 @@
 # backends. Everything else in the upstream repository - the examples, the
 # documentation, the other backends, misc/cpp - is deliberately not vendored.
 #
-#     pwsh -File tools/fetch-imgui.ps1                 # the pinned version
-#     pwsh -File tools/fetch-imgui.ps1 -Version v1.92.8
-#     pwsh -File tools/fetch-imgui.ps1 -Force           # replace an existing copy
+#     pwsh -File scripts/tools/fetch-imgui.ps1                 # the pinned version
+#     pwsh -File scripts/tools/fetch-imgui.ps1 -Version v1.92.8
+#     pwsh -File scripts/tools/fetch-imgui.ps1 -Force           # replace an existing copy
 
 param(
     [string]$Version = 'v1.92.9b',
@@ -20,8 +20,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-# This script lives in tools/, so the repository root is its parent.
-$Repo = Split-Path -Parent $PSScriptRoot
+# This script lives in scripts/tools/, so the repository root is two levels up.
+$Repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Dest = Join-Path $Repo 'vendor\imgui'
 
 # The exact upstream files the build needs. Keep this list in step with the
@@ -133,7 +133,7 @@ $Commit = (& git ls-remote "https://github.com/ocornut/imgui.git" "refs/tags/$Ve
 Dear ImGui $Version
 Source: https://github.com/ocornut/imgui
 Commit: $Commit
-Fetched by: tools/fetch-imgui.ps1
+Fetched by: scripts/tools/fetch-imgui.ps1
 
 Vendored deliberately, exactly like vendor/httplib.h and vendor/json.hpp, so a
 clone builds with no network access. The version is pinned: ImGui's API does
@@ -154,7 +154,7 @@ tempting to compile the backend directly against GLEW. Dear ImGui 1.92 dropped
 that hook: the macro is still tested but nothing includes a custom header any
 more, so defining it makes every GL type undefined. Do not reintroduce it.
 
-To refresh:   pwsh -File tools/fetch-imgui.ps1 -Version vX.Y.Z -Force
+To refresh:   pwsh -File scripts/tools/fetch-imgui.ps1 -Version vX.Y.Z -Force
 "@ | Set-Content (Join-Path $Dest 'IMGUI_VERSION.txt') -Encoding ascii
 
 Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue

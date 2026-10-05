@@ -15,34 +15,17 @@ rem   run-dashboard.bat --width 900 --height 420
 rem ---------------------------------------------------------------------------
 setlocal
 call "%~dp0_bin-dir.bat"
+if errorlevel 1 exit /b 1
 
-set "EXE=%BIN%\vn-mediabus-dashboard.exe"
-set "LOG=%BIN%\dashboard.log"
+set "APP_EXE=%BIN%\vn-mediabus-dashboard.exe"
+set "APP_LOG=%BIN%\dashboard.log"
+rem The launcher is a Windows-subsystem binary: it has no stdout to redirect.
+set "APP_STDERR_ONLY=1"
+set "APP_ARGS=%*"
 
-if not exist "%EXE%" (
-    echo.
-    echo Not built yet: "%EXE%"
-    echo Run scripts\build.bat first.
-    echo.
-    pause
-    exit /b 1
-)
-
-rem The launcher is a Windows-subsystem binary (no console is ever created), so
-rem this runs it detached with stderr in bin\dashboard.log. Note the absence of
-rem --tray: the window is meant to be seen here.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%EXE%' -ArgumentList '%*' -WorkingDirectory '%BIN%' -RedirectStandardError '%LOG%'"
-
-timeout /t 2 /nobreak >nul 2>&1
-tasklist /fi "imagename eq vn-mediabus-dashboard.exe" 2>nul | find /i "vn-mediabus-dashboard.exe" >nul
-if errorlevel 1 (
-    echo.
-    echo The launcher did not start. Read "%LOG%" - it says why.
-    echo.
-    pause
-    exit /b 1
-)
+call "%~dp0_start-app.bat"
+if errorlevel 1 exit /b 1
 
 echo vn-mediabus-dashboard is running, window shown.
-echo   log: %LOG%
+echo   log: %APP_LOG%
 exit /b 0

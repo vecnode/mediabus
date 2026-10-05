@@ -91,7 +91,7 @@ Desktop.ini
 # ---------------------------------------------------------------------------
 # Vendored Dear ImGui is TRACKED source, not build output: a clone must build
 # with no network access, exactly like vendor/httplib.h and vendor/json.hpp.
-# Produced or refreshed by tools/fetch-imgui.ps1.
+# Produced or refreshed by scripts/tools/fetch-imgui.ps1.
 # ---------------------------------------------------------------------------
 !vendor/**
 !vendor/imgui/**
@@ -113,20 +113,16 @@ compile_commands.json
 # ---------------------------------------------------------------------------
 # Local test media and fixtures
 # ---------------------------------------------------------------------------
-experiments/fixtures/
-experiments/**/*.exe
 tests/fixtures/
 
-# Local media used for live playback checks (regenerate with
-# experiments/fixtures/make-fixtures.ps1)
+# Local media used for live playback checks. Generated, not sources: bin/data is
+# a build output, so nothing inside it is worth tracking. What IS tracked under
+# data/ and assets/ are the reference Lua scripts, the icon and the shaders.
 bin/data/*.mp4
 bin/data/*.mkv
 bin/data/*.srt
 bin/data/*.png
 bin/data/*.jpg
-
-# Codec-matrix fixtures: regenerable generated media, ~2.4 MB.
-experiments/fixtures/codec/
 
 # ---------------------------------------------------------------------------
 # Generated: installed from data/ by the build. The tracked source of truth is

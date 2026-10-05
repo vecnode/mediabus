@@ -26,7 +26,7 @@ $env:PATH = "$Mingw\bin;$Msys\usr\bin;$env:SystemRoot\system32;$env:SystemRoot"
 $env:TEMP = "$Msys\tmp"
 $env:TMP  = "$Msys\tmp"
 
-$Repo = Split-Path -Parent $PSScriptRoot
+$Repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $BinDir = Join-Path $Repo 'bin'
 
 # Name -> how it is checked in the verify pass. The Player and the Controller

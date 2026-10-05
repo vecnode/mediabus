@@ -127,6 +127,14 @@ DashboardPanel::Frame DashboardPanel::draw(ui::UiLayer& ui, const DashboardModel
 			drawApplications(model, frame);
 			ImGui::EndTabItem();
 		}
+		// Corpus sits second because it is the question the Applications tab
+		// raises: that tab says where the media comes from, this one says what
+		// arrived. Scripts and Activity are the working tabs and stay last.
+		if (ImGui::BeginTabItem("Corpus", nullptr, selectFlags(Tab::Corpus))) {
+			frame.tab = Tab::Corpus;
+			drawMediaCorpus(model, frame);
+			ImGui::EndTabItem();
+		}
 		if (ImGui::BeginTabItem("Scripts", nullptr, selectFlags(Tab::Scripts))) {
 			frame.tab = Tab::Scripts;
 			drawScripts(model, library, document, controllerOnline, frame);
@@ -145,14 +153,21 @@ DashboardPanel::Frame DashboardPanel::draw(ui::UiLayer& ui, const DashboardModel
 	// in which case it is still the best answer available).
 	applyRequestedTab_ = false;
 
-	// Esc closes the launcher window. Whether that hides it or exits is the
-	// application's decision - it depends on whether a tray icon exists - so it
-	// is reported rather than acted on.
+	// Esc ASKS before it quits, and what it quits is the LAUNCHER - not the
+	// session. The Player and the Controller keep running and keep answering
+	// their APIs, because Esc is also the key that pulls the Player out of
+	// fullscreen and must never be the key that tears everything down. Stopping
+	// the other two stays with QUIT in the tray menu, which is labelled for it.
 	if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-		frame.requestQuit = true;
+		quitConfirmOpen_ = true;
 	}
 
 	ImGui::End();
+
+	// After End(): a modal is its own top-level window, so it is declared outside
+	// the launcher frame rather than nested inside it.
+	drawQuitConfirm(frame);
+
 	return frame;
 }
 
@@ -208,11 +223,21 @@ void DashboardPanel::drawApplications(const DashboardModel& model, Frame& frame)
 		}
 		ImGui::EndDisabled();
 		if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-			ImGui::SetTooltip(canStop
-				? "Stop the copy this launcher started"
-				: (row.running
-					? "A running %s this launcher did not start is not ours to stop"
-					: "Not running"));
+			// Three separate calls rather than one nested conditional: the middle
+			// case carries a format string, and a ternary that mixes a format with
+			// plain literals is how "A running %s ..." ended up with no argument
+			// to go with it - which SetTooltip passes straight to vsnprintf. The
+			// name is row.title, because a tooltip that cannot say WHICH
+			// application it means is not worth showing.
+			if (canStop) {
+				ImGui::SetTooltip("Stop the copy this launcher started");
+			} else if (row.running) {
+				ImGui::SetTooltip(
+					"A running %s this launcher did not start is not ours to stop",
+					row.title.c_str());
+			} else {
+				ImGui::SetTooltip("Not running");
+			}
 		}
 
 		ImGui::SameLine();
@@ -249,57 +274,221 @@ void DashboardPanel::drawApplications(const DashboardModel& model, Frame& frame)
 
 void DashboardPanel::drawCorpus(const DashboardModel& model, Frame& frame) {
 	const DashboardCorpus& corpus = model.corpus();
-	const float buttonWidth = ImGui::GetFontSize() * 7.0f;
+	const float fontSize = ImGui::GetFontSize();
+	const float buttonWidth = fontSize * 7.0f;
 
-	// The card has to hold three things: the name line with its status pill, the
-	// "running - libmpv video and audio - API :8080" line, and the button row
-	// under them. At 4.4 font-heights the button row fell outside the card and
-	// the Change... button was invisible - a card that clips its own call to
-	// action. 6.4 leaves room for all three at any font size, because the height
-	// is expressed in font-heights rather than in pixels.
-	ImGui::BeginChild("##corpus", ImVec2(0.0f, ImGui::GetFontSize() * 6.4f),
-		ImGuiChildFlags_Borders);
+	// AutoResizeY rather than a formula: the card holds a header, one row per
+	// folder, a count line and a button, and a fixed height either clips the last
+	// folder or leaves a scrollbar and dead space - both of which were visible
+	// with a mere two folders. Letting ImGui measure its own content cannot drift
+	// from what it draws.
+	ImGui::BeginChild("##corpus", ImVec2(0.0f, 0.0f),
+		ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
 
-	ImGui::TextUnformatted("Media folder");
+	ImGui::TextUnformatted(corpus.folders.size() == 1 ? "Media folder" : "Media folders");
 	ImGui::SameLine();
 	ImGui::TextDisabled("|");
 	ImGui::SameLine();
-
 	if (corpus.chosen()) {
-		ImGui::TextUnformatted(corpus.folder.c_str());
-		if (ImGui::IsItemHovered()) {
-			ImGui::SetTooltip("%s", corpus.folder.c_str());
-		}
+		ImGui::TextDisabled("%zu merged into one playlist", corpus.folders.size());
 	} else {
-		ImGui::TextDisabled("not set - the Player uses its own data folder");
+		ImGui::TextDisabled("none set - only the built-in shader library is read");
 	}
 
-	// Which folder the count refers to. The Player's answer is authoritative
+	// Every folder, each with its own Remove: this panel is also the only place to
+	// drop one that has moved or was added by mistake.
+	if (corpus.folders.empty()) {
+		ImGui::TextDisabled("nothing chosen");
+	} else {
+		for (const std::string& folder : corpus.folders) {
+			ImGui::PushID(folder.c_str());
+			if (ImGui::SmallButton("Remove")) {
+				frame.action = DashboardAction::RemoveMediaFolder;
+				frame.actionFolder = folder;
+			}
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("Stop merging %s", folder.c_str());
+			}
+			ImGui::SameLine();
+			ImGui::TextUnformatted(folder.c_str());
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("%s", folder.c_str());
+			}
+			ImGui::PopID();
+		}
+	}
+
+	// Which folders the count refers to. The Player's answer is authoritative
 	// while it is up: it is the process doing the scanning.
 	if (corpus.playerOnline) {
-		ImGui::TextColored(toImVec4(kOk), "%zu %s in the folder the Player is reading",
-			corpus.clipCount, corpus.clipCount == 1 ? "clip" : "clips");
-		if (!corpus.playerFolder.empty()) {
-			ImGui::SameLine();
-			ImGui::TextDisabled("(%s)", corpus.playerFolder.c_str());
-		}
+		ImGui::TextColored(toImVec4(kOk), "%zu %s from %zu folder(s) the Player is reading",
+			corpus.clipCount, corpus.clipCount == 1 ? "clip" : "clips",
+			corpus.playerFolders.size());
 	} else {
 		ImGui::TextDisabled("the Player is not running, so the count is what was "
 			"last written down");
 	}
 
 	ImGui::Spacing();
-	if (rightButton("Change...", buttonWidth, true,
-			"Choose the folder the Player reads its media from")) {
+	if (rightButton("Add folder...", buttonWidth, true,
+			"Add another folder: every folder listed is merged into one playlist")) {
 		frame.action = DashboardAction::ChooseMediaFolder;
 	}
 
 	ImGui::EndChild();
 }
 
+void DashboardPanel::drawMediaCorpus(const DashboardModel& model, Frame& frame) {
+	(void)frame;
+	const DashboardCorpus& corpus = model.corpus();
+	const std::vector<CorpusEntry>& clips = model.clipList();
+
+	ImGui::TextUnformatted(corpus.chosen() ? "Corpus" : "Corpus (built-in shaders only)");
+	ImGui::Separator();
+
+	// EVERY folder, not just the first. This is the tab whose whole job is to
+	// explain where the playlist came from, and with several folders merged a
+	// single line naming one of them is worse than useless: it makes a clip that
+	// came from another look like it came from nowhere.
+	if (corpus.folders.empty()) {
+		ImGui::TextColored(toImVec4(kWarn),
+			"No media folder chosen, so the playlist is the built-in shader library.");
+	} else {
+		for (const std::string& folder : corpus.folders) {
+			ImGui::TextDisabled("  %s", folder.c_str());
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("%s", folder.c_str());
+			}
+		}
+	}
+
+	// What the running Player says it is reading, when that disagrees with the
+	// list above - which happens the moment someone edits mediabus.ini by hand
+	// while a Player is already up.
+	if (corpus.playerOnline && !corpus.playerFolders.empty()
+		&& corpus.playerFolders != corpus.folders) {
+		ImGui::TextColored(toImVec4(kWarn), "the running Player is reading:");
+		for (const std::string& folder : corpus.playerFolders) {
+			ImGui::TextDisabled("  %s", folder.c_str());
+		}
+	}
+
+	if (!model.corpusStatus().empty()) {
+		ImGui::TextDisabled("%s", model.corpusStatus().c_str());
+	}
+
+	ImGui::Separator();
+
+	// "The list is empty" is three different situations with three different
+	// fixes, and an empty list on its own distinguishes none of them. Say which.
+	if (clips.empty()) {
+		ImGui::Spacing();
+		if (!corpus.playerOnline) {
+			ImGui::TextDisabled("The Player is not running, so there is no playlist "
+				"to read. Start it from the Applications tab.");
+		} else if (corpus.chosen()) {
+			ImGui::TextDisabled("This folder holds no media. Use Change... on the "
+				"Applications tab to point the Player somewhere else.");
+		} else {
+			ImGui::TextDisabled("Nothing is loaded. Choose a media folder with "
+				"Change... on the Applications tab.");
+		}
+		return;
+	}
+
+	ImGui::TextDisabled("%zu %s, newest scan", clips.size(),
+		clips.size() == 1 ? "clip" : "clips");
+	ImGui::Spacing();
+
+	ImGui::BeginChild("##cliplist", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders);
+
+	// A real corpus runs to thousands of entries, and ImGui would submit every
+	// one of them every frame. The clipper submits only the rows actually on
+	// screen, which is what keeps a large folder from making the launcher slow.
+	ImGuiListClipper clipper;
+	clipper.Begin(static_cast<int>(clips.size()));
+	while (clipper.Step()) {
+		for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+			const CorpusEntry& clip = clips[static_cast<std::size_t>(row)];
+			ImGui::PushID(static_cast<int>(clip.index));
+
+			ImGui::TextDisabled("%5zu", clip.index);
+			ImGui::SameLine();
+			ImGui::TextUnformatted(clip.name.c_str());
+			ImGui::SameLine();
+			ImGui::TextDisabled("%s", clip.mediaType.c_str());
+			if (ImGui::IsItemHovered()) {
+				ImGui::SetTooltip("%s", clip.path.c_str());
+			}
+
+			ImGui::PopID();
+		}
+	}
+
+	ImGui::EndChild();
+}
+
+void DashboardPanel::drawQuitConfirm(Frame& frame) {
+	static const char* const kPopup = "Quit the launcher?";
+
+	// Was it ALREADY open before this frame? The press that opens the modal must
+	// not also cancel it, and ImGui's own Escape-closes-a-popup path only runs
+	// when keyboard navigation is active, which this interface does not turn on.
+	const bool wasOpen = ImGui::IsPopupOpen(kPopup);
+
+	if (quitConfirmOpen_) {
+		ImGui::OpenPopup(kPopup);
+		quitConfirmOpen_ = false;
+	}
+
+	// A ceiling on the width, so a longer sentence can never make the modal wider
+	// than the window it belongs to. The lines below are short enough not to need
+	// wrapping, which is deliberate: TextWrapped and AlwaysAutoResize fight each
+	// other over the width.
+	const ImVec2 display = ImGui::GetIO().DisplaySize;
+	ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f),
+		ImVec2(display.x * 0.8f, display.y * 0.8f));
+
+	if (!ImGui::BeginPopupModal(kPopup, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		return;
+	}
+
+	// Centre from the size ImGui reports AFTER Begin, rather than trusting a pivot
+	// on SetNextWindowPos. A pivot is resolved against the size known before this
+	// frame's layout, and ImGui defers the actual move while it measures - a lot of
+	// machinery to depend on for a dialog that must simply be in the middle. The
+	// size here is the size the modal really has, and because this runs every frame
+	// the modal also stays centred if the window is resized.
+	const ImVec2 size = ImGui::GetWindowSize();
+	ImGui::SetWindowPos(ImVec2((display.x - size.x) * 0.5f,
+		(display.y - size.y) * 0.5f));
+
+	ImGui::TextUnformatted("Close the launcher?");
+	ImGui::TextDisabled("The Player and the Controller keep running.");
+	ImGui::TextDisabled("QUIT in the tray menu stops them too.");
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+
+	const float buttonWidth = ImGui::GetFontSize() * 5.0f;
+	if (ImGui::Button("Yes", ImVec2(buttonWidth, 0.0f))) {
+		frame.requestQuit = true;
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("No", ImVec2(buttonWidth, 0.0f))
+		|| (wasOpen && ImGui::IsKeyPressed(ImGuiKey_Escape, false))) {
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::EndPopup();
+}
+
 void DashboardPanel::drawScripts(const DashboardModel& model, ScriptLibrary* library,
 	ScriptDocument& document, bool controllerOnline, Frame& frame) {
 	(void)model;
+	// The editor reports through its own one-shot requests rather than through
+	// Frame, so the frame is not this function's to fill in.
+	(void)frame;
 
 	if (!controllerOnline || library == nullptr) {
 		// Not hidden: an operator who came here looking for the editor is told

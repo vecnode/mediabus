@@ -5,6 +5,8 @@
 #include <array>
 #include <cstddef>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace media {
 
@@ -20,10 +22,15 @@ enum class DashboardAction {
 	LaunchController,
 	StopPlayer,
 	StopController,
-	/// Open the folder picker for the media corpus. This is the setting the
-	/// whole point of the launcher is to own: one place to say where the media
-	/// is, which both other applications then read.
+	/// Open the folder picker to ADD a folder to the corpus. The corpus is the
+	/// merge of every folder listed, so this APPENDS rather than replaces - which
+	/// is what makes "media in two places" configurable without moving files
+	/// around or filling one folder with shortcuts.
 	ChooseMediaFolder,
+	/// Drop one folder from the corpus. Which folder travels in
+	/// DashboardPanel::Frame::actionFolder, because the action on its own cannot
+	/// say which of several rows was clicked.
+	RemoveMediaFolder,
 };
 
 const char* toString(DashboardAction action);
@@ -56,25 +63,51 @@ struct DashboardRow {
 	bool canStop() const { return running && managed; }
 };
 
-/// The media corpus panel: which folder the Player reads, and how many videos
-/// are in it. Deliberately not a DashboardRow - it has one button rather than
-/// two, no "is it running" dot, and a different shape, and expressing those as
-/// flags on the app rows would make every one of them conditional.
+/// The media corpus panel: which folders the Player reads, and how many clips
+/// came out of them. Deliberately not a DashboardRow - it has its own buttons,
+/// no "is it running" dot, and a different shape, and expressing those as flags
+/// on the app rows would make every one of them conditional.
 struct DashboardCorpus {
-	/// What mediabus.ini holds. Empty means the Player's own default.
-	std::string folder;
+	/// Every folder the configuration holds, in order. The corpus is the MERGE of
+	/// all of them. Empty means nothing has been chosen.
+	std::vector<std::string> folders;
+	/// How many clips the merged corpus holds.
 	std::size_t clipCount = 0;
 	/// The Player is up, so the count is live rather than whatever the last
 	/// session wrote down.
 	bool playerOnline = false;
-	/// The folder the Player was last seen using, empty when it reported the
-	/// default. Kept separately from `folder` so the panel can say which of the
-	/// two the count refers to.
-	std::string playerFolder;
+	/// The folders the Player reported it is actually reading. Kept separately
+	/// from `folders` so the panel can say which of the two the count refers to -
+	/// someone can edit mediabus.ini while a Player is already running.
+	std::vector<std::string> playerFolders;
 
-	/// True when there is a folder worth naming. The empty state is drawn
-	/// dimmed rather than as a failure: an unset corpus is a normal first run.
-	bool chosen() const { return !folder.empty(); }
+	/// True when there is at least one folder worth naming. The empty state is
+	/// drawn dimmed rather than as a failure: an unset corpus is a normal first
+	/// run.
+	bool chosen() const { return !folders.empty(); }
+
+	/// The first configured folder, or empty. For the one-line callers that have
+	/// a single folder to name; prefer `folders`.
+	std::string primaryFolder() const {
+		return folders.empty() ? std::string() : folders.front();
+	}
+	/// The first folder the Player reported, or empty.
+	std::string primaryPlayerFolder() const {
+		return playerFolders.empty() ? std::string() : playerFolders.front();
+	}
+};
+
+/// One entry of the playlist the Player reports, for the Corpus tab.
+///
+/// A trimmed copy rather than `MediaPlayerClipInfo`: the launcher is an HTTP
+/// client of the Player, and it should not have to link the media layer to draw a
+/// list of names. The view needs exactly these fields and nothing else.
+struct CorpusEntry {
+	std::size_t index = 0;
+	std::string name;
+	std::string path;
+	/// "image" or "video", as the Player spells it.
+	std::string mediaType;
 };
 
 /// The Dashboard's state and the small amount of derived text its interface
@@ -111,14 +144,39 @@ public:
 	void setStatus(DashboardApp app, const AppStatus& status,
 		const std::string& path, int port);
 
-	/// Replace the media corpus panel. `folder` is what mediabus.ini holds
-	/// (empty when unset); `playerFolder` is what the Player is *actually*
-	/// using, which is empty both when it is down and when it is on the
-	/// default - `playerOnline` tells the two apart.
-	void setCorpus(std::string folder, std::size_t clipCount, bool playerOnline,
-		std::string playerFolder);
+	/// Replace the media corpus panel. `folders` is what mediabus.ini holds
+	/// (empty when unset); `playerFolders` is what the Player is *actually*
+	/// reading, which is empty both when it is down and when nothing is chosen -
+	/// `playerOnline` tells those apart.
+	void setCorpus(std::vector<std::string> folders, std::size_t clipCount,
+		bool playerOnline, std::vector<std::string> playerFolders);
+
+	/// Convenience for the single-folder case, kept because most call sites and
+	/// most operators have exactly one folder.
+	void setCorpus(const std::string& folder, std::size_t clipCount,
+		bool playerOnline, const std::string& playerFolder) {
+		setCorpus(folder.empty() ? std::vector<std::string>{}
+				: std::vector<std::string>{folder},
+			clipCount, playerOnline,
+			playerFolder.empty() ? std::vector<std::string>{}
+				: std::vector<std::string>{playerFolder});
+	}
 
 	const DashboardCorpus& corpus() const { return corpus_; }
+
+	/// Replace the playlist the Corpus tab lists. Filled by the application from
+	/// the Player's `/api/clips`, because this class never talks to the network.
+	///
+	/// An empty list is ambiguous on its own - the Player may be down, or the
+	/// folder may simply hold nothing - which is why `corpusStatus()` exists to
+	/// say which, and why the tab draws it rather than an empty list.
+	void setClipList(std::vector<CorpusEntry> clips) { clips_ = std::move(clips); }
+	const std::vector<CorpusEntry>& clipList() const { return clips_; }
+
+	/// One line explaining the state of the list above: how many were read and
+	/// when, or why they could not be. Empty shows nothing.
+	void setCorpusStatus(std::string status) { corpusStatus_ = std::move(status); }
+	const std::string& corpusStatus() const { return corpusStatus_; }
 
 	/// One line of feedback (last launch/stop result). Empty shows nothing.
 	void setMessage(std::string message);
@@ -152,6 +210,8 @@ private:
 
 	std::array<DashboardRow, kRowCount> rows_{};
 	DashboardCorpus corpus_;
+	std::vector<CorpusEntry> clips_;
+	std::string corpusStatus_;
 	std::string message_;
 	std::string activityLog_;
 };

@@ -66,13 +66,13 @@ if ($Clean -and (Test-Path $BuildDir)) {
 # libmpv must exist before configuring: the build fails fast with a clear
 # message if it is missing, but a nicer place to say so is here.
 if (-not (Test-Path (Join-Path $Repo 'vendor\libmpv\lib\libmpv.dll.a'))) {
-    throw "Vendored libmpv missing. Run:  pwsh -File tools/build-libmpv.ps1"
+    throw "Vendored libmpv missing. Run:  pwsh -File scripts/tools/build-libmpv.ps1"
 }
 
 # Dear ImGui is vendored under vendor/imgui and is tracked, so a clone builds
 # with no network access. This is only the hint for how to reproduce it.
 if (-not (Test-Path (Join-Path $Repo 'vendor\imgui\imgui.cpp'))) {
-    throw "Vendored Dear ImGui missing. Run:  pwsh -File tools/fetch-imgui.ps1"
+    throw "Vendored Dear ImGui missing. Run:  pwsh -File scripts/tools/fetch-imgui.ps1"
 }
 
 Write-Host ">>> configuring with $Cmake"

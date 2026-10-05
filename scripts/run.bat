@@ -24,49 +24,31 @@ setlocal
 call "%~dp0_bin-dir.bat"
 if errorlevel 1 exit /b 1
 
-set "EXE=%BIN%\vn-mediabus-dashboard.exe"
-set "LOG=%BIN%\dashboard.log"
+set "APP_EXE=%BIN%\vn-mediabus-dashboard.exe"
+set "APP_LOG=%BIN%\dashboard.log"
+rem The launcher is a Windows-subsystem binary: it has no stdout to redirect.
+set "APP_STDERR_ONLY=1"
 
-if not exist "%EXE%" (
-    echo.
-    echo Not built yet: "%EXE%"
-    echo Run scripts\build.bat first.
-    echo.
-    pause
-    exit /b 1
-)
-
-rem --show is this script's own switch; everything else is passed to the
-rem launcher. Banner off means "stay in the tray", which is the normal case.
-set "ARGS=--tray"
+rem --show is this script's own switch, consumed here; everything else is handed
+rem to the launcher. `%*` is deliberately NOT used for the pass-through: `shift`
+rem does not touch `%*`, so the switch would be forwarded as well and arrive at
+rem the launcher as an unknown argument. Rebuilding the list is the only way to
+rem actually drop it. (An argument containing a double quote is still not
+rem supported here, which is a batch limitation rather than a decision.)
+set "APP_ARGS=--tray"
 if /i "%~1"=="--show" (
-    set "ARGS="
-    shift
+	set "APP_ARGS="
+	shift
 )
+:collect
+if "%~1"=="" goto collected
+set "APP_ARGS=%APP_ARGS% %~1"
+shift
+goto collect
+:collected
 
-rem Start it detached, with its output in bin\dashboard.log.
-rem
-rem This goes through PowerShell's Start-Process instead of `start`, for two
-rem measured reasons: `start` does not pass a redirection on to its child, so the
-rem log came out empty, and a launcher whose log is empty is undiagnosable when
-rem it refuses to appear. The launcher is a Windows subsystem binary, so no
-rem console window appears next to the tray icon either way.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%EXE%' -ArgumentList '%ARGS% %*' -WorkingDirectory '%BIN%' -RedirectStandardError '%LOG%'"
-
-rem Confirm it actually came up. A launcher missing a runtime DLL dies before
-rem main() and prints nothing at all, which would otherwise look like nothing
-rem happened; this is also how a double-click reports success or failure.
-timeout /t 2 /nobreak >nul 2>&1
-tasklist /fi "imagename eq vn-mediabus-dashboard.exe" 2>nul | find /i "vn-mediabus-dashboard.exe" >nul
-if errorlevel 1 (
-    echo.
-    echo The launcher did not start.
-    echo Check that bin\ has been built with scripts\build.bat, then read
-    echo "%LOG%" - it says why.
-    echo.
-    pause
-    exit /b 1
-)
+call "%~dp0_start-app.bat"
+if errorlevel 1 exit /b 1
 
 echo vn-mediabus launcher is running.
 echo   right-click its tray icon to launch the Player or the Controller, or to quit.

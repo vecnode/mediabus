@@ -58,7 +58,12 @@ std::string TransportExecutor::chooseMediaFolder() {
 	// the selection. The Player stays the writer when it *is* up.
 	config::Config stored;
 	config::load(stored);
-	stored.mediaFolder = choice.path;
+	// Replaces the whole list, which is what this picker means: it selects THE
+	// corpus folder. The Dashboard is where several folders are managed, because
+	// one picker cannot express "add" and "remove" at once.
+	stored.mediaFolders = choice.path.empty()
+		? std::vector<std::string>{}
+		: std::vector<std::string>{choice.path};
 	if (config::save(stored)) {
 		return "media folder saved for the next Player start: " + choice.path;
 	}

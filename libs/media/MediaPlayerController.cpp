@@ -37,6 +37,10 @@ void MediaPlayerController::syncSubtitleText() {
 }
 
 bool MediaPlayerController::setup() {
+	// An explicit setup supersedes a walk that is still running: whatever it has
+	// produced so far is what gets opened, because the caller has said it does not
+	// want to wait for the rest.
+	scanSetupPending_ = false;
 	if (clips_.empty()) {
 		LOG_ERROR("Controller") << "No clips discovered";
 		return false;
@@ -79,9 +83,18 @@ bool MediaPlayerController::openClipAtIndex(std::size_t index, bool autoplay) {
 		return false;
 	}
 
+	const MediaClip& clip = clips_.clipAt(index);
+	const bool shader = clip.mediaType == ClipMediaType::Shader;
+
 	if (backend_ != nullptr) {
-		const MediaClip& clip = clips_.clipAt(index);
-		if (!backend_->open(clip, autoplay)) {
+		if (shader) {
+			// A shader has no decoder, so it must NOT be handed to mpv. mpv would
+			// reject a .frag as an unrecognised format, and that failure would
+			// present as a broken clip rather than as a clip of a different kind.
+			// Closing stops whatever was playing, which is what "open this one"
+			// has to mean either way.
+			backend_->close();
+		} else if (!backend_->open(clip, autoplay)) {
 			LOG_WARN("Controller") << "backend refused to open " << clip.displayName;
 			return false;
 		}
@@ -91,10 +104,10 @@ bool MediaPlayerController::openClipAtIndex(std::size_t index, bool autoplay) {
 	loaded_ = true;
 	syncSubtitleText();
 	notifyClipChanged();
-	LOG_NOTICE("Controller") << "Opened [" << index << "] "
-		<< clips_.clipAt(index).displayName << " ("
-		<< toString(clips_.clipAt(index).mediaType) << ")"
-		<< (autoplay ? " and started it" : ", held on its first frame");
+	LOG_NOTICE("Controller") << "Opened [" << index << "] " << clip.displayName
+		<< " (" << toString(clip.mediaType) << ")"
+		<< (shader ? " for the shader renderer"
+			: (autoplay ? " and started it" : ", held on its first frame"));
 	return true;
 }
 
@@ -127,43 +140,158 @@ void MediaPlayerController::reloadAfterLibraryChange() {
 	openClipAtIndex(currentIndex_);
 }
 
-std::size_t MediaPlayerController::rescan() {
+bool MediaPlayerController::beginScan() {
 	auto* library = dynamic_cast<MediaClipLibrary*>(&clips_);
 	if (library == nullptr) {
+		// A non-disk source (a test double, a future JSON playlist) has no "scan"
+		// to ask for. The caller's own source is authoritative, so there is
+		// nothing to walk and nothing to wait for.
+		scanSetupPending_ = false;
+		return true;
+	}
+
+	library->scanBegin();
+	scanSetupPending_ = true;
+
+	// One bounded slice, synchronously, so a normal corpus behaves exactly as it
+	// always did: the count the caller gets back is final and the first clip is
+	// already open before the next line runs. Only a folder that cannot finish
+	// inside this window - the case that used to freeze the window for minutes -
+	// leaves the walk running for pollScan() to carry.
+	if (!library->scanStep(MediaClipLibrary::ScanBudget::perRequest())) {
+		LOG_NOTICE("Controller") << "scan started: " << library->scanEntries()
+			<< " entries so far; the window stays live while it finishes";
+		return false;
+	}
+
+	scanSetupPending_ = false;
+	reloadAfterLibraryChange();
+	return true;
+}
+
+bool MediaPlayerController::pollScan() {
+	auto* library = dynamic_cast<MediaClipLibrary*>(&clips_);
+	if (library == nullptr) {
+		scanSetupPending_ = false;
+		return false;
+	}
+
+	// One frame's worth of walking. This is the whole reason the walk is
+	// incremental: the caller is a render loop, and it must get the frame back.
+	if (library->scanning()
+		&& !library->scanStep(MediaClipLibrary::ScanBudget::perFrame())) {
+		return false;
+	}
+
+	if (!scanSetupPending_) {
+		return false;   // nothing was waiting on the walk
+	}
+	scanSetupPending_ = false;
+	// The playlist is final (or the folder was empty). Open the first clip, or
+	// clear the decoder when there is nothing - the same rule rescan() uses, so
+	// the two cannot disagree about what "the library changed" means.
+	reloadAfterLibraryChange();
+	return true;
+}
+
+bool MediaPlayerController::scanPending() const {
+	const auto* library = dynamic_cast<const MediaClipLibrary*>(&clips_);
+	return library != nullptr && library->scanning();
+}
+
+void MediaPlayerController::beginStartupScan(const std::vector<std::string>& directories) {
+	auto* library = dynamic_cast<MediaClipLibrary*>(&clips_);
+	if (library == nullptr) {
+		return;
+	}
+	library->setRoots(directories);
+	// Deliberately NOT one synchronous slice the way beginScan() takes one: at
+	// startup there is no reason to spend even 250 ms before the first frame, and
+	// the first pollScan() is a few milliseconds away. The walk is begun, not
+	// done - which is what keeps the window painting.
+	library->scanBegin();
+	scanSetupPending_ = true;
+}
+
+void MediaPlayerController::beginStartupScan(const std::string& directory) {
+	beginStartupScan(directory.empty()
+		? std::vector<std::string>{}
+		: std::vector<std::string>{directory});
+}
+
+std::size_t MediaPlayerController::rescan() {
+	if (dynamic_cast<MediaClipLibrary*>(&clips_) == nullptr) {
 		// A non-disk source (a test double, a future JSON playlist) has no
 		// "scan" to ask for; report what it already holds rather than lying.
 		return clips_.size();
 	}
-	library->scan();
-	reloadAfterLibraryChange();
-	LOG_NOTICE("Controller") << "rescan: " << clips_.size() << " clip(s)";
+	if (beginScan()) {
+		LOG_NOTICE("Controller") << "rescan: " << clips_.size() << " clip(s)";
+	}
 	return clips_.size();
 }
 
-std::size_t MediaPlayerController::setMediaFolder(const std::string& directory) {
+std::size_t MediaPlayerController::setMediaFolders(const std::vector<std::string>& directories) {
 	auto* library = dynamic_cast<MediaClipLibrary*>(&clips_);
 	if (library == nullptr) {
 		// Nothing to re-point and nothing to scan; the caller's own source is
 		// authoritative. Reported as unchanged rather than silently ignored.
 		return clips_.size();
 	}
-	// An empty path restores the library's default root (the Player's data
-	// directory), which is what "no folder chosen" means.
-	library->setRoot(directory);
-	library->scan();
-	reloadAfterLibraryChange();
-	const std::string where = library->root();
-	LOG_NOTICE("Controller") << "media folder now "
-		<< (where.empty() ? std::string("(default)") : where)
-		<< " - " << clips_.size() << " clip(s)";
+
+	// Empty entries are dropped rather than kept: a UI that submits a list with a
+	// blank row in it means "two folders", not "two folders and nowhere".
+	std::vector<std::string> wanted;
+	wanted.reserve(directories.size());
+	for (const std::string& folder : directories) {
+		if (!folder.empty()) {
+			wanted.push_back(folder);
+		}
+	}
+	library->setRoots(wanted);
+
+	if (wanted.empty()) {
+		// "No folder chosen" is a real state, not a fallback to the data folder:
+		// nothing of the operator's is walked, and what is left is the built-in
+		// shader library. See beginStartupScan().
+		scanSetupPending_ = false;
+		library->scanBegin();
+		reloadAfterLibraryChange();
+		LOG_NOTICE("Controller") << "media corpus cleared - nothing chosen, "
+			<< clips_.size() << " clip(s) from the built-in shader library";
+		return clips_.size();
+	}
+
+	const bool finished = beginScan();
+	LOG_NOTICE("Controller") << "media corpus is now " << wanted.size()
+		<< " folder(s), merged - " << clips_.size() << " clip(s)"
+		<< (finished ? "" : " (still scanning)");
+	for (const std::string& folder : wanted) {
+		LOG_NOTICE("Controller") << "  " << folder;
+	}
 	return clips_.size();
 }
 
-std::string MediaPlayerController::mediaFolder() const {
-	if (const auto* library = dynamic_cast<const MediaClipLibrary*>(&clips_)) {
-		return library->root();
+std::size_t MediaPlayerController::setMediaFolder(const std::string& directory) {
+	return setMediaFolders(directory.empty()
+		? std::vector<std::string>{}
+		: std::vector<std::string>{directory});
+}
+
+std::vector<std::string> MediaPlayerController::mediaFolders() const {
+	const auto* library = dynamic_cast<const MediaClipLibrary*>(&clips_);
+	if (library == nullptr) {
+		return {};
 	}
-	return {};
+	// Gated on hasRoot() so the library's built-in default is never reported as a
+	// folder the operator chose. That distinction is what the empty screen, the
+	// Controller's corpus field and the Dashboard row all turn on.
+	return library->hasRoot() ? library->roots() : std::vector<std::string>{};
+}
+
+std::string MediaPlayerController::mediaFolder() const {
+	const std::vector<std::string> all = mediaFolders();
+	return all.empty() ? std::string() : all.front();
 }
 
 void MediaPlayerController::play() {
@@ -281,10 +409,21 @@ MediaPlayerStatus MediaPlayerController::getStatus() const {
 	status.subtitleText = subtitleText_;
 	status.loaded = loaded_;
 
+	// A walk that outlives the frame it started in. Reported rather than hidden:
+	// clipCount above is a PARTIAL count while this is true, so a client drawing
+	// a playlist needs to be able to tell the difference.
+	if (const auto* library = dynamic_cast<const MediaClipLibrary*>(&clips_)) {
+		status.scanning = library->scanning();
+		status.scanEntries = library->scanEntries();
+		status.scanTruncated = library->scanTruncated();
+	}
+
 	if (loaded_ && currentIndex_ < clipCount()) {
 		const MediaClip& clip = clips_.clipAt(currentIndex_);
 		status.clipName = clip.displayName;
+		status.clipPath = clip.absolutePath;
 		status.isImage = clip.mediaType == ClipMediaType::Image;
+		status.isShader = clip.mediaType == ClipMediaType::Shader;
 	}
 
 	if (backend_ != nullptr) {

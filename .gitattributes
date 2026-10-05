@@ -28,7 +28,7 @@
 *.hpp  text eol=lf
 *.inc  text eol=lf
 
-# Scripting. No BOM, ever: tools/check-lua.ps1 enforces the ASCII half of this.
+# Scripting. No BOM, ever: Lua 5.1 treats one as a syntax error.
 *.lua text eol=lf
 
 # Build and documentation.
@@ -42,7 +42,6 @@ CMakeLists.txt text eol=lf
 # Vendored code counts against nothing: it is not ours to review, and git's
 # language statistics should describe this project rather than Dear ImGui.
 vendor/** linguist-vendored
-experiments/fixtures/** linguist-documentation
 
 # Binary.
 *.ico  binary

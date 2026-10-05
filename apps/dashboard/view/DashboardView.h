@@ -25,13 +25,22 @@ namespace media {
 class DashboardPanel {
 public:
 	/// Which panel is on screen.
-	enum class Tab { Applications, Scripts, Log };
+	enum class Tab { Applications, Corpus, Scripts, Log };
 
 	struct Frame {
 		/// An action to run, or None.
 		DashboardAction action = DashboardAction::None;
-		/// True when the operator asked to quit. Only meaningful when there is no
-		/// tray icon, because otherwise QUIT lives in the tray menu.
+		/// The folder a RemoveMediaFolder action refers to, empty otherwise.
+		/// The action alone cannot say which of several rows was clicked, and an
+		/// index would be a snapshot of a list that may have changed since.
+		std::string actionFolder;
+		/// True when the operator confirmed a quit (Esc, then Yes).
+		///
+		/// It means QUIT THE LAUNCHER, and deliberately nothing more: the Player
+		/// and the Controller are left running. Esc is also the key that takes the
+		/// Player out of fullscreen, so it must never be a way to tear the whole
+		/// session down - stopping the other applications stays with QUIT in the
+		/// tray menu, which says so.
 		bool requestQuit = false;
 		/// The tab that is on screen after this frame.
 		Tab tab = Tab::Applications;
@@ -98,13 +107,26 @@ public:
 private:
 	void drawApplications(const DashboardModel& model, Frame& frame);
 	void drawCorpus(const DashboardModel& model, Frame& frame);
+	/// The Corpus TAB: the playlist the Player reports, entry by entry.
+	///
+	/// A different question from drawCorpus(), which is the one-line folder and
+	/// count card on the Applications tab. That answers "where is the media
+	/// coming from"; this answers "what did it actually find".
+	void drawMediaCorpus(const DashboardModel& model, Frame& frame);
 	void drawScripts(const DashboardModel& model, ScriptLibrary* library,
 		ScriptDocument& document, bool controllerOnline, Frame& frame);
 	void drawLog(const DashboardModel& model);
+	/// The Yes/No confirmation Esc opens. Reports a confirmed quit through
+	/// `frame.requestQuit`; cancelling leaves everything alone.
+	void drawQuitConfirm(Frame& frame);
 
 	Tab tab_ = Tab::Applications;
 	/// True while a setTab() request has not been handed to ImGui yet.
 	bool applyRequestedTab_ = false;
+	/// Set by Esc, consumed on the next draw by OpenPopup. A flag rather than an
+	/// immediate OpenPopup because the key is read in the same frame the popup has
+	/// to be declared, and ImGui needs the Open call to precede BeginPopup.
+	bool quitConfirmOpen_ = false;
 	std::string scriptStatus_;
 	std::string selected_;
 	std::vector<ScriptEntry> scripts_;

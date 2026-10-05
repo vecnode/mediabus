@@ -1,12 +1,19 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 /// The small amount of state the three applications share across runs.
 ///
-/// At the moment that is one thing: **which folder the Player's media corpus
-/// lives in**. The Dashboard is where it is set and displayed, the Controller
-/// can ask for it to change, and the Player reads it before its first scan.
+/// At the moment that is one thing: **which folders the Player's media corpus
+/// lives in**. The Dashboard is where they are set and displayed, the Controller
+/// can ask for them to change, and the Player reads them before its first scan.
+///
+/// The list is written as one `mediaFolder` line PER FOLDER, repeated, rather
+/// than as a delimited string: a path may legally contain any delimiter worth
+/// choosing, and a format that has to escape its own separator is not the dumb
+/// format this file is supposed to be. Reading accepts any number of lines, so a
+/// file written by an older single-folder build still loads.
 ///
 /// It lives in a text file next to the executable (`bin\mediabus.ini`), not
 /// in the registry and not in `%APPDATA%`: the whole point of this repository is
@@ -27,10 +34,26 @@ inline constexpr const char* kKeyUiScale = "uiScale";
 
 /// The in-memory view of the file. Absent keys keep their default.
 struct Config {
-	/// Absolute path of the folder the Player scans for media. Empty means
-	/// "whatever the caller's default is", which for the Player is
-	/// `<exeDir>/data`.
-	std::string mediaFolder;
+	/// Absolute paths of every folder the Player reads, in order. The corpus is
+	/// the MERGE of all of them, de-duplicated by absolute path.
+	///
+	/// A list rather than one folder because media is rarely in one place, and a
+	/// "corpus folder" that must be a single directory forces an operator to
+	/// either move their files or fill a folder with shortcuts.
+	///
+	/// EMPTY means nothing has been chosen, which is a real state: the Player
+	/// then reads only the shader library that ships with the application.
+	std::vector<std::string> mediaFolders;
+
+	/// The first chosen folder, or empty.
+	///
+	/// A convenience for the many call sites that have exactly one folder to
+	/// name - the `mediaFolder` field on /api/status, the Controller's corpus
+	/// field - so that each of them does not have to invent its own answer to
+	/// "which one is THE folder".
+	std::string primaryMediaFolder() const {
+		return mediaFolders.empty() ? std::string() : mediaFolders.front();
+	}
 
 	/// Multiplier applied on top of the DPI-derived text scale. 0 means "not
 	/// set", which leaves the DPI decision alone. An operator who still finds

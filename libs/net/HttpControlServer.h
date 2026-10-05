@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace media {
 
@@ -28,9 +29,13 @@ struct PresentationHooks {
 	std::function<bool()> getFullscreen;
 	/// Set fullscreen state. Returns false when the host refused.
 	std::function<bool(bool)> setFullscreen;
-	/// The folder the playlist is being read from, for /api/status. Empty when
-	/// the host has no library (the tests), which reads as "the default".
-	std::function<std::string()> getMediaFolder;
+	/// The folders the playlist is being read from, for /api/status. Empty when
+	/// the host has no library (the tests), which reads as "nothing chosen".
+	///
+	/// The list, not one folder: the corpus is the merge of every entry, and a
+	/// client that shows only the first cannot explain why a clip is in the list
+	/// or why a folder it knows about is not.
+	std::function<std::vector<std::string>()> getMediaFolders;
 };
 
 /// Localhost-only JSON control API.

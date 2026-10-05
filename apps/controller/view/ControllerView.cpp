@@ -140,14 +140,72 @@ ControllerPanel::Frame ControllerPanel::draw(ui::UiLayer& ui, const ControllerMo
 	drawScripts(model, scriptName, scriptError, scriptRunning, frame);
 	drawMessage(model);
 
-	// Esc closes the window, as it did before the interface changed. ImGui owns
-	// the keyboard while a field has focus, so a text field's Esc is not a quit.
+	// Esc ASKS before it quits. It used to close the bar outright, which made a
+	// single keystroke - the one every operator reaches for on reflex - destroy
+	// the transport. It is also the key that pulls the Player out of fullscreen,
+	// so it must not be a destructive key anywhere in this set of applications.
+	// ImGui owns the keyboard while a field has focus, so a text field's Esc is
+	// still just an Esc.
 	if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-		frame.requestQuit = true;
+		quitConfirmOpen_ = true;
 	}
+	drawQuitConfirm(frame);
 
 	ImGui::End();
 	return frame;
+}
+
+void ControllerPanel::drawQuitConfirm(Frame& frame) {
+	static const char* const kPopup = "Quit the Controller?";
+
+	// Was the popup ALREADY up before this frame? The press that opens it must
+	// not also cancel it, and I cannot rely on ImGui to swallow it: its
+	// Escape-closes-a-popup path only runs when keyboard navigation is active,
+	// which this interface does not turn on. So cancellation is accepted only
+	// from the frame after the one that opened it.
+	const bool wasOpen = ImGui::IsPopupOpen(kPopup);
+
+	if (quitConfirmOpen_) {
+		ImGui::OpenPopup(kPopup);
+		quitConfirmOpen_ = false;
+	}
+
+	// A ceiling on the width, so a longer sentence cannot make the modal wider
+	// than the window it belongs to.
+	const ImVec2 display = ImGui::GetIO().DisplaySize;
+	ImGui::SetNextWindowSizeConstraints(ImVec2(0.0f, 0.0f),
+		ImVec2(display.x * 0.8f, display.y * 0.8f));
+
+	if (!ImGui::BeginPopupModal(kPopup, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+		return;
+	}
+
+	// Centred from the size ImGui reports AFTER Begin, not with a pivot on
+	// SetNextWindowPos: a pivot is resolved against the pre-layout size and the move
+	// is deferred while ImGui measures, which is more machinery than this needs.
+	// GetIO() rather than the caller's `io`, which is a local of draw().
+	const ImVec2 size = ImGui::GetWindowSize();
+	ImGui::SetWindowPos(ImVec2((display.x - size.x) * 0.5f,
+		(display.y - size.y) * 0.5f));
+
+	ImGui::TextUnformatted("Close the Controller bar?");
+	ImGui::TextDisabled("The Player keeps running.");
+	ImGui::TextDisabled("Only this window closes.");
+	ImGui::Spacing();
+	ImGui::Separator();
+	ImGui::Spacing();
+
+	const float buttonWidth = ImGui::GetFontSize() * 5.0f;
+	if (ImGui::Button("Yes", ImVec2(buttonWidth, 0.0f))) {
+		frame.requestQuit = true;
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::SameLine();
+	if (ImGui::Button("No", ImVec2(buttonWidth, 0.0f))
+		|| (wasOpen && ImGui::IsKeyPressed(ImGuiKey_Escape, false))) {
+		ImGui::CloseCurrentPopup();
+	}
+	ImGui::EndPopup();
 }
 
 void ControllerPanel::drawStatusRow(const ControllerModel& model) {

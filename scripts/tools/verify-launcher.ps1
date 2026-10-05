@@ -20,8 +20,8 @@
 
 $ErrorActionPreference = 'Stop'
 
-# This script lives in tools/, so the repository root is its parent.
-$Repo = Split-Path $PSScriptRoot -Parent
+# This script lives in scripts/tools/, so the repository root is two levels up.
+$Repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Bin = Join-Path $Repo 'bin'
 $Exe = Join-Path $Bin 'vn-mediabus-dashboard.exe'
 $Log = Join-Path $Bin 'verify-launcher.err'
